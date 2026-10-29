@@ -14,6 +14,12 @@ import {
   searchActions,
   type ActionSummary,
   type ThemePreference,
+  createBackup,
+  listBackups,
+  previewRestore,
+  restoreBackup,
+  type Backup,
+  type RestorePreview,
 } from './api.ts'
 import {
   InfoIcon,
@@ -68,6 +74,56 @@ export function App() {
   const [theme, setTheme] = useState<ThemePreference>('system')
   const [health, setHealth] = useState<HealthState>({ state: 'checking' })
   const [announcement, setAnnouncement] = useState('')
+  const [backups, setBackups] = useState<Backup[]>([])
+  const [backupMessage, setBackupMessage] = useState('')
+  const [restorePlan, setRestorePlan] = useState<{ id: string; preview: RestorePreview } | null>(null)
+  const [backupBusy, setBackupBusy] = useState(false)
+
+  const refreshBackups = useCallback(async () => {
+    const state = await listBackups()
+    setBackups(state.backups)
+    if (state.lastFailure) setBackupMessage(state.lastFailure)
+  }, [])
+
+  useEffect(() => {
+    if (phase !== 'ready') return
+    const timer = window.setInterval(() => {
+      void refreshBackups().catch(() => setBackupMessage('Could not check backups. Verify the Friday data home and retry.'))
+    }, 30_000)
+    return () => window.clearInterval(timer)
+  }, [phase, refreshBackups])
+
+  const backupNow = async () => {
+    setBackupBusy(true)
+    try {
+      await createBackup()
+      await refreshBackups()
+      setBackupMessage('Backup saved in Friday’s data home.')
+    } catch (error) { setBackupMessage(`Backup failed: ${error instanceof Error ? error.message : String(error)}`) }
+    finally { setBackupBusy(false) }
+  }
+
+  const preview = async (id: string) => {
+    setBackupBusy(true)
+    try { setRestorePlan({ id, preview: await previewRestore(id) }); setBackupMessage('') }
+    catch (error) { setRestorePlan(null); setBackupMessage(`Restore preview refused: ${error instanceof Error ? error.message : String(error)}`) }
+    finally { setBackupBusy(false) }
+  }
+
+  const replace = async () => {
+    if (!restorePlan) return
+    setBackupBusy(true)
+    try {
+      const { theme: restored } = await restoreBackup(restorePlan.id, restorePlan.preview.confirmation)
+      themeRef.current = restored
+      setTheme(restored)
+      applyTheme(restored)
+      setRestorePlan(null)
+      await refreshBackups()
+      setBackupMessage('Authored state restored. A pre-restore backup was saved.')
+    } catch (error) { setRestorePlan(null); setBackupMessage(`Restore refused: ${error instanceof Error ? error.message : String(error)}`) }
+    finally { setBackupBusy(false) }
+  }
   const [paletteOpen, setPaletteOpen] = useState(false)
   const [aboutOpen, setAboutOpen] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
@@ -159,6 +215,7 @@ export function App() {
         setTheme(payload.theme)
         applyTheme(payload.theme)
         setPhase('ready')
+        void refreshBackups().catch(() => setBackupMessage('Could not list backups. Check the Friday data home and retry.'))
         await refreshHealth()
       } catch (error) {
         if (cancelled) return
@@ -175,7 +232,7 @@ export function App() {
     return () => {
       cancelled = true
     }
-  }, [refreshHealth])
+  }, [refreshHealth, refreshBackups])
 
   useEffect(() => {
     return watchSystemTheme(() => {
@@ -569,6 +626,25 @@ export function App() {
                     </ul>
                   ) : null}
                 </div>
+              </section>
+              <section className="actions" aria-labelledby="backup-title">
+                <div className="section-head">
+                  <h2 id="backup-title" className="title-large">Authored-state backups</h2>
+                  <p className="section-head__note">Preferences and identities only; currently appearance is the only authored value. Same-disk copies do not protect against device loss.</p>
+                </div>
+                <button type="button" className="button button--primary" disabled={phase !== 'ready' || backupBusy} onClick={() => void backupNow()}>Back up now</button>
+                <p role="status">{backupMessage || 'Daily copies are saved while Friday is active and after missed days.'}</p>
+                <ul>
+                  {backups.map((backup) => <li key={backup.id}>
+                    {backup.kind} · {backup.createdAt} · {backup.counts.preferences} preference(s){' '}
+                    <button type="button" className="button button--quiet" disabled={backupBusy} onClick={() => void preview(backup.id)}>Preview restore</button>
+                  </li>)}
+                </ul>
+                {restorePlan && <div role="group" aria-label="Restore confirmation">
+                  <p>Replace {restorePlan.preview.currentTheme} with {restorePlan.preview.restoredTheme}? This replaces authored preferences, not the rebuildable action index. A pre-restore copy is required.</p>
+                  <button type="button" className="button button--primary" disabled={backupBusy} onClick={() => void replace()}>Replace authored state</button>
+                  <button type="button" className="button button--quiet" onClick={() => setRestorePlan(null)}>Cancel restore</button>
+                </div>}
               </section>
             </>
           )}

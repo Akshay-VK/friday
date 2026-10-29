@@ -84,6 +84,24 @@ test('the shell renders with landmarks, a local font, and no remote requests', a
   )
 })
 
+test('backup controls restore appearance through explicit preview and confirmation', async (t) => {
+  const browser = requireBrowser(t)
+  if (!browser) return
+  const host = await startHarness()
+  t.after(() => host.stop())
+  const page = await openShell(browser, host)
+  t.after(() => page.close())
+  await page.getByRole('button', { name: 'Dark', exact: true }).click()
+  await page.getByRole('button', { name: 'Back up now' }).click()
+  await page.getByText('Backup saved', { exact: false }).waitFor()
+  await page.getByRole('button', { name: 'System', exact: true }).click()
+  await page.locator('li').filter({ hasText: 'manual' }).getByRole('button', { name: 'Preview restore' }).click()
+  await page.getByText('Replace system with dark', { exact: false }).waitFor()
+  await page.getByRole('button', { name: 'Replace authored state' }).click()
+  await page.locator('button[aria-pressed="true"]').filter({ hasText: 'Dark' }).waitFor()
+  assert.equal(await page.getByRole('button', { name: 'Dark', exact: true }).getAttribute('aria-pressed'), 'true')
+})
+
 test('keyboard focus is visible and the skip link is first', async (t) => {
   const browser = requireBrowser(t)
   if (!browser) return

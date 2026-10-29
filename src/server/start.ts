@@ -58,11 +58,18 @@ export async function startFriday(options?: {
     throw error
   }
 
+  // Catch up once after downtime and check UTC day rollover while the host is active.
+  const backupClock = () => process.env.FRIDAY_DIAGNOSTICS === '1' ? process.env.FRIDAY_TEST_NOW : undefined
+  const checkBackup = () => void store.dailyBackup(backupClock()).catch((error: unknown) => console.error('Daily backup failed; check Friday data home free space and permissions:', error))
+  checkBackup()
+  const dailyTimer = setInterval(checkBackup, 60_000)
+
   return {
     url: `http://127.0.0.1:${boundPort}`,
     port: boundPort,
     dataHome,
     close: async () => {
+      clearInterval(dailyTimer)
       await new Promise<void>((resolve, reject) => {
         server.close((error) => (error ? reject(error) : resolve()))
       })

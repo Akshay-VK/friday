@@ -34,6 +34,7 @@ import {
   SystemIcon,
 } from './icons.tsx'
 import { CommandPalette } from './Palette.tsx'
+import { Sources } from './Sources.tsx'
 import { createActionRegistry, type ActionContext } from './registry.ts'
 import {
   applyTheme,
@@ -78,6 +79,7 @@ export function App() {
   const [backupMessage, setBackupMessage] = useState('')
   const [restorePlan, setRestorePlan] = useState<{ id: string; preview: RestorePreview } | null>(null)
   const [backupBusy, setBackupBusy] = useState(false)
+  const [sourceRefresh, setSourceRefresh] = useState(0)
 
   const refreshBackups = useCallback(async () => {
     const state = await listBackups()
@@ -98,6 +100,7 @@ export function App() {
     try {
       await createBackup()
       await refreshBackups()
+      setSourceRefresh((value) => value + 1)
       setBackupMessage('Backup saved in Friday’s data home.')
     } catch (error) { setBackupMessage(`Backup failed: ${error instanceof Error ? error.message : String(error)}`) }
     finally { setBackupBusy(false) }
@@ -425,9 +428,7 @@ export function App() {
                     quietly observed.
                   </h1>
                   <p className="hero__lede">
-                    Friday keeps its own state outside your projects. This build
-                    proves the foundation: a loopback-only service, one database
-                    owner, and a preference that survives a restart.
+                    Friday keeps its own state outside your projects. Choose and review a bounded local-read preview before approving a scan root.
                   </p>
                   <div className="hero__actions">
                     <button
@@ -451,8 +452,7 @@ export function App() {
                     </button>
                   </div>
                   <p className="hero__footnote">
-                    Nothing here scans a folder, reads a credential, opens a
-                    program, or runs a work command.
+                    Only your explicit preview reads folder metadata. Friday does not read credentials, open a program, or run a work command here.
                   </p>
                 </div>
                 <div className="hero__motif" aria-hidden="true">
@@ -556,14 +556,13 @@ export function App() {
                       Sources
                     </dt>
                     <dd>
-                      <span className="ledger__value">None configured</span>
+                      <span className="ledger__value">Explicit local-read grants only</span>
                       <span className="ledger__meta">
-                        No scan root, network integration, credential, or work
-                        command is enabled in this slice.
+                        Scan roots require a temporary preview and exact approval. Network integration, credentials and work commands are not enabled.
                       </span>
                     </dd>
                     <dd className="ledger__control">
-                      <span className="badge badge--muted">Empty by design</span>
+                      <a href="#sources-title">Manage</a>
                     </dd>
                   </div>
                 </dl>
@@ -627,10 +626,11 @@ export function App() {
                   ) : null}
                 </div>
               </section>
+              <Sources ready={phase === 'ready'} refreshKey={sourceRefresh} />
               <section className="actions" aria-labelledby="backup-title">
                 <div className="section-head">
                   <h2 id="backup-title" className="title-large">Authored-state backups</h2>
-                  <p className="section-head__note">Preferences and identities only; currently appearance is the only authored value. Same-disk copies do not protect against device loss.</p>
+                  <p className="section-head__note">Preferences and scan-root configuration are backed up; restored roots remain disabled until separately previewed and approved again. Same-disk copies do not protect against device loss.</p>
                 </div>
                 <button type="button" className="button button--primary" disabled={phase !== 'ready' || backupBusy} onClick={() => void backupNow()}>Back up now</button>
                 <p role="status">{backupMessage || 'Daily copies are saved while Friday is active and after missed days.'}</p>
@@ -641,7 +641,7 @@ export function App() {
                   </li>)}
                 </ul>
                 {restorePlan && <div role="group" aria-label="Restore confirmation">
-                  <p>Replace {restorePlan.preview.currentTheme} with {restorePlan.preview.restoredTheme}? This replaces authored preferences, not the rebuildable action index. A pre-restore copy is required.</p>
+                  <p>Replace {restorePlan.preview.currentTheme} with {restorePlan.preview.restoredTheme} and restore scan-root configuration? Restored roots remain disabled. The rebuildable action index is not restored. A pre-restore copy is required.</p>
                   <button type="button" className="button button--primary" disabled={backupBusy} onClick={() => void replace()}>Replace authored state</button>
                   <button type="button" className="button button--quiet" onClick={() => setRestorePlan(null)}>Cancel restore</button>
                 </div>}
@@ -720,9 +720,9 @@ function AboutDialog({
         </h2>
       </div>
       <p className="body">
-        A local, read-only control room for your laptop. This slice is a
-        foundation: loopback-only HTTP, a single-owner SQLite store with FTS5,
-        one restart-persistent appearance preference, and one command palette.
+        A local control room for your laptop. This build offers a guarded,
+        explicit folder preview and scan-root grants alongside the local shell,
+        SQLite store, backup and command palette.
       </p>
       <dl className="about__meta">
         <div>
@@ -736,8 +736,9 @@ function AboutDialog({
         <div>
           <dt>Not in this build</dt>
           <dd>
-            Source scanning, credentials, network integrations, OpenCode
-            service, Telegram, and Run execution
+            Project inventory, credential integrations, network integrations,
+            OpenCode service, Telegram, and Run execution. Windows folder
+            previews remain blocked until native safety verification is complete.
           </dd>
         </div>
       </dl>

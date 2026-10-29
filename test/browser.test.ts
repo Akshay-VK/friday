@@ -84,6 +84,31 @@ test('the shell renders with landmarks, a local font, and no remote requests', a
   )
 })
 
+test('a person previews and cancels a fixture root without granting permission, then approves and disables it', async (t) => {
+  const browser = requireBrowser(t)
+  if (!browser) return
+  const root = await mkdtemp(join(tmpdir(), 'friday-browser-source-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const host = await startHarness()
+  t.after(() => host.stop())
+  const page = await openShell(browser, host)
+  t.after(() => page.close())
+  await page.getByLabel('Native folder path').fill(root)
+  await page.getByRole('button', { name: 'Preview local reads temporarily' }).click()
+  await page.getByRole('group', { name: 'Review scan root' }).waitFor()
+  await page.getByRole('button', { name: 'Cancel preview' }).click()
+  await page.getByText('Preview cancelled. No permission was saved.').waitFor()
+  assert.deepEqual(await (await fetch(`${host.url}/api/sources`)).json(), { sources: [] })
+  await page.getByRole('button', { name: 'Preview local reads temporarily' }).click()
+  await page.getByRole('button', { name: 'Approve exact scan root' }).click()
+  await page.getByText('Exact local-read scan root approved', { exact: false }).waitFor()
+  await page.getByRole('button', { name: 'Disable' }).click()
+  await page.getByText('Scan root disabled.', { exact: false }).waitFor()
+  await page.getByRole('button', { name: 'Revoke' }).click()
+  await page.getByText('Scan root revoked.').waitFor()
+  assert.deepEqual(await (await fetch(`${host.url}/api/sources`)).json(), { sources: [] })
+})
+
 test('backup controls restore appearance through explicit preview and confirmation', async (t) => {
   const browser = requireBrowser(t)
   if (!browser) return

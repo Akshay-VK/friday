@@ -13,7 +13,7 @@
     "dev": "npm run build && npm start",
     "typecheck": "tsc --noEmit",
     "pretest": "npm run build",
-    "test": "node --test --test-concurrency=1 test/api.test.ts test/ui.test.ts test/backup.test.ts",
+    "test": "node --test --test-concurrency=1 test/api.test.ts test/ui.test.ts test/backup.test.ts test/sources.test.ts",
     "test:browser": "npm run build && node --test --test-concurrency=1 test/browser.test.ts",
     "verify": "npm run typecheck && npm test && npm run test:browser"
   },

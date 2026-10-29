@@ -13,6 +13,9 @@ import {
   searchActions,
   seedActions,
   setTheme,
+  listSources,
+  addSource,
+  disableSource,
 } from './schema.ts'
 
 const { dataHome } = workerData as { dataHome: string }
@@ -24,7 +27,7 @@ function send(message: StoreWorkerOutput) {
 let db: ReturnType<typeof openStore>
 let pending: { id: string; confirmation: string; revision: string; checksum: string; expires: number } | undefined
 let lastFailure: string | undefined
-const revision = () => createHash('sha256').update(JSON.stringify(db.prepare('SELECT * FROM preferences ORDER BY key').all())).digest('hex')
+const revision = () => createHash('sha256').update(JSON.stringify([db.prepare('SELECT * FROM preferences ORDER BY key').all(), db.prepare("SELECT name FROM sqlite_master WHERE name='sources'").get() ? listSources(db) : []])).digest('hex')
 try {
   mkdirSync(dataHome, { recursive: true })
   db = openStore(dataHome)
@@ -43,6 +46,21 @@ parentPort?.on('message', (message: StoreWorkerInput) => {
     switch (message.type) {
       case 'getTheme':
         send({ type: 'result', id: message.id, value: getTheme(db) })
+        break
+      case 'listSources':
+        send({ type: 'result', id: message.id, value: listSources(db) })
+        break
+      case 'addSource':
+        pending = undefined
+        send({ type: 'result', id: message.id, value: addSource(db, message.source) })
+        break
+      case 'disableSource':
+        pending = undefined
+        send({ type: 'result', id: message.id, value: disableSource(db, message.sourceId, message.revision) })
+        break
+      case 'revokeSource':
+        pending = undefined
+        send({ type: 'result', id: message.id, value: db.prepare('DELETE FROM sources WHERE id=?').run(message.sourceId).changes > 0 })
         break
       case 'setTheme':
         pending = undefined
@@ -82,7 +100,7 @@ parentPort?.on('message', (message: StoreWorkerInput) => {
       case 'previewRestore': {
         const { manifest, rows } = inspect(dataHome, message.backupId)
         pending = { id: message.backupId, confirmation: randomUUID(), revision: revision(), checksum: manifest.checksum, expires: Date.now() + 5 * 60_000 }
-        send({ type: 'result', id: message.id, value: { confirmation: pending.confirmation, currentTheme: getTheme(db), restoredTheme: rows.find((row) => row.key === 'theme')?.value ?? 'system', counts: manifest.counts, excluded: ['action_registry', 'action_search', 'friday.lock', 'WAL/SHM'], createdAt: manifest.createdAt } })
+        send({ type: 'result', id: message.id, value: { confirmation: pending.confirmation, currentTheme: getTheme(db), restoredTheme: rows.preferences.find((row) => row.key === 'theme')?.value ?? 'system', counts: manifest.counts, excluded: ['action_registry', 'action_search', 'friday.lock', 'WAL/SHM'], createdAt: manifest.createdAt } })
         break
       }
       case 'restore': {
@@ -93,8 +111,10 @@ parentPort?.on('message', (message: StoreWorkerInput) => {
         createBackup(db, dataHome, 'pre-restore')
         db.transaction(() => {
           db.prepare('DELETE FROM preferences').run()
+          db.prepare('DELETE FROM sources').run()
           const insert = db.prepare('INSERT INTO preferences (key, value, revision, updated_at) VALUES (@key, @value, @revision, @updated_at)')
-          for (const row of rows) insert.run(row)
+          for (const row of rows.preferences) insert.run(row)
+          for (const source of rows.sources) addSource(db, { ...source, enabled: false, health: 'disabled', revision: source.revision + 1 })
         })()
         lastFailure = undefined
         send({ type: 'result', id: message.id, value: { theme: getTheme(db) } })

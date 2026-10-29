@@ -3,16 +3,16 @@ import { createHash, randomUUID } from 'node:crypto'
 import { closeSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { APP_VERSION } from '../config.ts'
-import { isTheme } from './schema.ts'
+import { isTheme, listSources, type Source } from './schema.ts'
 
 // Explicit authored-state inventory. Later slices must add authored tables/files here
 // and extend both export and import; action_registry/FTS, lock and WAL are derived.
-export const AUTHORED_TABLES = ['preferences'] as const
+export const AUTHORED_TABLES = ['preferences', 'sources'] as const
 export const AUTHORED_FILES: readonly string[] = []
 const FORMAT = 1
-const SCHEMA = 2
+const SCHEMA = 3
 type Row = { key: string; value: string; revision: number; updated_at: string }
-type Manifest = { format: number; schemaVersion: number; appVersion: string; createdAt: string; kind: string; counts: { preferences: number; files: number }; checksum: string; inventory: { tables: string[]; files: string[] } }
+type Manifest = { format: number; schemaVersion: number; appVersion: string; createdAt: string; kind: string; counts: { preferences: number; sources?: number; files: number }; checksum: string; inventory: { tables: string[]; files: string[] } }
 
 function hash(bytes: Buffer): string { return createHash('sha256').update(bytes).digest('hex') }
 function rows(db: Database.Database): Row[] {
@@ -30,25 +30,26 @@ function syncDirectory(path: string) {
 function directory(home: string) { return join(home, 'backups') }
 function safeId(id: string) { if (!/^[a-f0-9-]{36}$/.test(id)) throw new Error('Invalid backup ID') }
 
-export function inspect(home: string, id: string): { manifest: Manifest; rows: Row[] } {
+export function inspect(home: string, id: string): { manifest: Manifest; rows: { preferences: Row[]; sources: Source[] } } {
   safeId(id)
   return inspectPath(join(directory(home), id))
 }
 
-function inspectPath(path: string): { manifest: Manifest; rows: Row[] } {
+function inspectPath(path: string): { manifest: Manifest; rows: { preferences: Row[]; sources: Source[] } } {
   const files = readdirSync(path).sort()
   if (files.join(',') !== 'manifest.json,state.sqlite' || !lstatSync(path).isDirectory() || files.some((file) => !lstatSync(join(path, file)).isFile())) throw new Error('Snapshot files are missing or unexpected')
   const manifest = JSON.parse(readFileSync(join(path, 'manifest.json'), 'utf8')) as Manifest
-  if (manifest.format !== FORMAT || manifest.schemaVersion !== SCHEMA || manifest.appVersion !== APP_VERSION || manifest.inventory?.tables?.join(',') !== AUTHORED_TABLES.join(',') || manifest.inventory?.files?.length !== 0 || manifest.counts?.files !== 0 || !Number.isFinite(Date.parse(manifest.createdAt))) throw new Error('Snapshot format or schema is incompatible with this Friday version')
+  if (manifest.format !== FORMAT || ![2, SCHEMA].includes(manifest.schemaVersion) || manifest.appVersion !== APP_VERSION || manifest.inventory?.tables?.join(',') !== (manifest.schemaVersion === 2 ? 'preferences' : AUTHORED_TABLES.join(',')) || manifest.inventory?.files?.length !== 0 || manifest.counts?.files !== 0 || !Number.isFinite(Date.parse(manifest.createdAt))) throw new Error('Snapshot format or schema is incompatible with this Friday version')
   const file = join(path, 'state.sqlite')
   if (hash(readFileSync(file)) !== manifest.checksum) throw new Error('Snapshot checksum mismatch')
   const snapshot = new Database(file, { readonly: true, fileMustExist: true })
   try {
-    if ((snapshot.pragma('quick_check', { simple: true }) as string) !== 'ok' || (snapshot.pragma('user_version', { simple: true }) as number) !== SCHEMA) throw new Error('Snapshot database is invalid')
+    if ((snapshot.pragma('quick_check', { simple: true }) as string) !== 'ok' || (snapshot.pragma('user_version', { simple: true }) as number) !== manifest.schemaVersion) throw new Error('Snapshot database is invalid')
     const data = rows(snapshot)
     valid(data)
-    if (data.length !== manifest.counts.preferences) throw new Error('Snapshot count mismatch')
-    return { manifest, rows: data }
+    const sources = manifest.schemaVersion === 2 ? [] : listSources(snapshot)
+    if (data.length !== manifest.counts.preferences || sources.length !== (manifest.counts.sources ?? 0) || sources.some((s) => !s.id || !s.path || !s.nativePath || !['local', 'windows'].includes(s.host) || !Array.isArray(s.exclusions) || !Number.isSafeInteger(s.revision) || s.revision < 1)) throw new Error('Snapshot count or source configuration invalid')
+    return { manifest, rows: { preferences: data, sources } }
   } finally { snapshot.close() }
 }
 
@@ -62,16 +63,21 @@ export function createBackup(db: Database.Database, home: string, kind = 'manual
   try {
     // This worker owns all writes; synchronous export prevents interleaving with mutations.
     const data = rows(db)
+    const sourceData = (db.pragma('user_version', { simple: true }) as number) >= 3 ? listSources(db) : []
     valid(data)
     const snapshotFile = join(staging, 'state.sqlite')
     const snapshot = new Database(snapshotFile)
     try {
-      snapshot.exec('CREATE TABLE preferences (key TEXT PRIMARY KEY, value TEXT NOT NULL, revision INTEGER NOT NULL, updated_at TEXT NOT NULL); PRAGMA user_version = 2;')
+      snapshot.exec('CREATE TABLE preferences (key TEXT PRIMARY KEY, value TEXT NOT NULL, revision INTEGER NOT NULL, updated_at TEXT NOT NULL); CREATE TABLE sources (id TEXT PRIMARY KEY, path TEXT NOT NULL, native_path TEXT NOT NULL, host TEXT NOT NULL, exclusions TEXT NOT NULL, enabled INTEGER NOT NULL, revision INTEGER NOT NULL, health TEXT NOT NULL); PRAGMA user_version = 3;')
       const insert = snapshot.prepare('INSERT INTO preferences (key, value, revision, updated_at) VALUES (@key, @value, @revision, @updated_at)')
-      snapshot.transaction(() => { for (const row of data) insert.run(row) })()
+      snapshot.transaction(() => {
+        for (const row of data) insert.run(row)
+        const add = snapshot.prepare('INSERT INTO sources VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+        for (const source of sourceData) add.run(source.id, source.path, source.nativePath, source.host, JSON.stringify(source.exclusions), source.enabled ? 1 : 0, source.revision, source.health)
+      })()
     } finally { snapshot.close() }
     sync(snapshotFile)
-    const manifest: Manifest = { format: FORMAT, schemaVersion: SCHEMA, appVersion: APP_VERSION, createdAt: now.toISOString(), kind, counts: { preferences: data.length, files: 0 }, checksum: hash(readFileSync(snapshotFile)), inventory: { tables: [...AUTHORED_TABLES], files: [] } }
+    const manifest: Manifest = { format: FORMAT, schemaVersion: SCHEMA, appVersion: APP_VERSION, createdAt: now.toISOString(), kind, counts: { preferences: data.length, sources: sourceData.length, files: 0 }, checksum: hash(readFileSync(snapshotFile)), inventory: { tables: [...AUTHORED_TABLES], files: [] } }
     writeFileSync(join(staging, 'manifest.json'), JSON.stringify(manifest))
     sync(join(staging, 'manifest.json'))
     // Reopen the staged bundle and validate the same manifest/checksum/schema

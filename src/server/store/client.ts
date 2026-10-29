@@ -4,6 +4,7 @@ import type {
   StoreWorkerInput,
   StoreWorkerOutput,
   ThemePreference,
+  Source,
 } from './schema.ts'
 
 type Pending = {
@@ -101,6 +102,11 @@ export class StoreClient {
   getTheme(): Promise<ThemePreference> {
     return this.#request({ type: 'getTheme' })
   }
+
+  listSources(): Promise<Source[]> { return this.#request({ type: 'listSources' }) }
+  addSource(source: Source): Promise<Source> { return this.#request({ type: 'addSource', source }) }
+  disableSource(sourceId: string, revision: number): Promise<Source> { return this.#request({ type: 'disableSource', sourceId, revision }) }
+  revokeSource(sourceId: string): Promise<boolean> { return this.#request({ type: 'revokeSource', sourceId }) }
 
   createBackup(): Promise<{ id: string; counts: { preferences: number }; createdAt: string }> { return this.#request({ type: 'createBackup' }) }
   listBackups(): Promise<{ backups: Array<{ id: string; createdAt: string; kind: string; counts: { preferences: number } }>; lastFailure?: string }> { return this.#request({ type: 'listBackups' }) }

@@ -5,6 +5,7 @@ import type {
   StoreWorkerOutput,
   ThemePreference,
   Source,
+  Approval,
 } from './schema.ts'
 
 type Pending = {
@@ -105,6 +106,10 @@ export class StoreClient {
 
   listSources(): Promise<Source[]> { return this.#request({ type: 'listSources' }) }
   addSource(source: Source): Promise<Source> { return this.#request({ type: 'addSource', source }) }
+  registerApproval(approval: Approval): Promise<boolean> { return this.#request({ type: 'registerApproval', approval }) }
+  cancelApproval(approvalId: string, owner: string): Promise<boolean> { return this.#request({ type: 'cancelApproval', approvalId, owner }) }
+  approveSource(approvalId: string, owner: string, source: Source, identity: string | undefined, generation: number, leaseDeadline?: number): Promise<Source> { return this.#request({ type: 'approveSource', approvalId, owner, source, identity, generation, leaseDeadline }) }
+  invalidateApprovals(paths: string[]): Promise<boolean> { return this.#request({ type: 'invalidateApprovals', paths }) }
   disableSource(sourceId: string, revision: number): Promise<Source> { return this.#request({ type: 'disableSource', sourceId, revision }) }
   setSourceHealth(sourceId: string, revision: number, health: Source['health']): Promise<Source> { return this.#request({ type: 'setSourceHealth', sourceId, revision, health }) }
   revokeSource(sourceId: string): Promise<boolean> { return this.#request({ type: 'revokeSource', sourceId }) }

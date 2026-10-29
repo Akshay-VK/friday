@@ -28,6 +28,27 @@ test('scan roots start empty; preview is an explicit temporary read and cancel c
   assert.equal(await readFile(join(root, '.hidden'), 'utf8'), 'untouched')
 })
 
+test('one preview authorizes at most one simultaneous approval; cancel and retry retain no stale grant', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'friday-source-fixture-'))
+  const home = await mkdtemp(join(tmpdir(), 'friday-fixture-home-'))
+  const host = await startFriday({ dataHome: home, port: 0 })
+  t.after(async () => { await host.close(); await rm(root, { recursive: true, force: true }); await rm(home, { recursive: true, force: true }) })
+  const session = await bootstrap(host.url)
+  const headers = mutationHeaders(host.url, session.cookie, session.body.csrfToken)
+  const post = (route: string, body: object) => fetch(`${host.url}/api/sources${route}`, { method: 'POST', headers, body: JSON.stringify(body) })
+  const scope = { path: root, host: 'local', exclusions: [] }
+  const first = await (await post('/preview', scope)).json() as { previewId: string }
+  const results = await Promise.all([post('', { ...scope, previewId: first.previewId }), post('', { ...scope, previewId: first.previewId })])
+  assert.deepEqual(results.map((r) => r.status).sort(), [200, 400])
+  const second = await (await post('/preview', scope)).json() as { previewId: string }
+  assert.equal((await post('/cancel', { previewId: second.previewId })).status, 200)
+  assert.equal((await post('', { ...scope, previewId: second.previewId })).status, 400)
+  const third = await (await post('/preview', scope)).json() as { previewId: string }
+  assert.equal((await post('', { ...scope, previewId: third.previewId })).status, 200)
+  const saved = await (await fetch(`${host.url}/api/sources`)).json() as { sources: unknown[] }
+  assert.equal(saved.sources.length, 2)
+})
+
 test('approval saves exact scope; disable and revoke block further reads; backup restores authored grant disabled', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'friday-source-fixture-'))
   const host = await startHarness()

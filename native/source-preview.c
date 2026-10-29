@@ -83,7 +83,7 @@ static void json_string(const wchar_t *s, size_t len) {
 int wmain(int argc, wchar_t **argv) {
   HMODULE cloud = LoadLibraryExW(L"CldApi.dll", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
   CLASSIFY classify = cloud ? (CLASSIFY)GetProcAddress(cloud, "CfGetPlaceholderStateFromAttributeTag") : NULL;
-  if (argc != 4 || (wcscmp(argv[1], L"--preview") && wcscmp(argv[1], L"--identity")) ||
+  if (argc != 4 || (wcscmp(argv[1], L"--preview") && wcscmp(argv[1], L"--identity") && wcscmp(argv[1], L"--hold")) ||
       !input(argv[2]) || !input(argv[3]) || !classify) return fail(L"unsupported path or cloud classifier unavailable");
   HANDLE root = open_dir(argv[2]);
   if (root == INVALID_HANDLE_VALUE) return fail(L"root open");
@@ -116,7 +116,22 @@ int wmain(int argc, wchar_t **argv) {
   printf(",\"identity\":\"%016llx-", (unsigned long long)ri.VolumeSerialNumber);
   for (int i = 0; i < 16; ++i) printf("%02x", (unsigned)ri.FileId.Identifier[i]);
   printf("\",\"sample\":[");
-  if (!wcscmp(argv[1], L"--identity")) { printf("],\"skipped\":[],\"truncated\":false}\n"); result = 0; goto done; }
+  if (wcscmp(argv[1], L"--preview")) {
+    printf("],\"skipped\":[],\"truncated\":false}\n"); fflush(stdout);
+    if (!wcscmp(argv[1], L"--hold")) {
+      // The parent's pipe closes on death. No lock survives cancellation or a
+      // stalled store transaction indefinitely, even if the parent never acks.
+      HANDLE pipe = GetStdHandle(STD_INPUT_HANDLE);
+      ULONGLONG deadline = GetTickCount64() + 30000;
+      DWORD available = 0, read = 0; char ack;
+      while (GetTickCount64() < deadline) {
+        if (!PeekNamedPipe(pipe, NULL, 0, NULL, &available, NULL)) break;
+        if (available) { ReadFile(pipe, &ack, 1, &read, NULL); break; }
+        Sleep(10);
+      }
+    }
+    result = 0; goto done;
+  }
   BYTE buffer[16384];
   int seen = 0, stop = 0, samples = 0, skipped = 0, truncated = 0;
   wchar_t skipped_names[LIMIT][1024];

@@ -17,23 +17,18 @@ const TTL = 2 * 60_000
 const WINDOWS_HELPER = fileURLToPath(new URL('../../native/source-preview.exe', import.meta.url))
 type NativeResult = { version: 1; nativePath: string; identity: string; sample: string[]; skipped: string[]; truncated: boolean }
 
-function nativePreview(path: string, home: string, mode: '--preview' | '--identity', signal?: AbortSignal): Promise<NativeResult> {
+function nativePreview(path: string, home: string, mode: '--preview' | '--identity' | '--hold', signal?: AbortSignal): Promise<{ value: NativeResult; release: () => Promise<void> }> {
   return new Promise((resolveResult, reject) => {
     if (signal?.aborted) { reject(new Error('Preview cancelled')); return }
-    const child = spawn(WINDOWS_HELPER, [mode, path, home], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], signal })
+    const child = spawn(WINDOWS_HELPER, [mode, path, home], { windowsHide: true, stdio: [mode === '--hold' ? 'pipe' : 'ignore', 'pipe', 'pipe'], signal })
     let output = ''
     let errorOutput = ''
     let oversized = false
+    let settled = false
+    let childClosed = false
     const timeout = setTimeout(() => { child.kill(); reject(new Error('Native metadata preview timed out')) }, 5_000)
-    child.stdout.on('data', (chunk: Buffer) => {
-      if (Buffer.byteLength(output) + chunk.length > 65_536) { oversized = true; child.kill() }
-      else output += chunk.toString('utf8')
-    })
-    child.stderr.on('data', (chunk: Buffer) => { if (errorOutput.length < 1024) errorOutput += chunk.toString('utf8').slice(0, 1024) })
-    child.on('error', (e) => { clearTimeout(timeout); reject(e) })
-    child.on('close', (status) => {
-      clearTimeout(timeout)
-      if (status !== 0 || oversized || signal?.aborted) { reject(new Error(`Native metadata verification refused (${errorOutput.trim() || 'cancelled or unavailable'})`)); return }
+    const parseOutput = () => {
+      if (settled) return
       try {
         const result: unknown = JSON.parse(output)
         const value = result as NativeResult
@@ -41,9 +36,30 @@ function nativePreview(path: string, home: string, mode: '--preview' | '--identi
         if (value.version !== 1 || typeof value.nativePath !== 'string' || !validPath(value.nativePath) || value.nativePath.toLowerCase() !== path.toLowerCase() ||
             typeof value.identity !== 'string' || !/^[a-f0-9]{16}-[a-f0-9]{32}$/.test(value.identity) ||
             !names(value.sample) || !names(value.skipped) || value.sample.length + value.skipped.length > LIMIT ||
-            typeof value.truncated !== 'boolean' || (mode === '--identity' && (value.sample.length !== 0 || value.skipped.length !== 0 || value.truncated))) throw new Error('Invalid native metadata response')
-        resolveResult(value)
-      } catch { reject(new Error('Invalid native metadata response')) }
+            typeof value.truncated !== 'boolean' || (mode !== '--preview' && (value.sample.length !== 0 || value.skipped.length !== 0 || value.truncated))) throw new Error('Invalid native metadata response')
+        settled = true
+        clearTimeout(timeout)
+        resolveResult({ value, release: async () => {
+          if (childClosed) return
+          const closed = new Promise<void>((resolve) => child.once('close', () => resolve()))
+          child.stdin?.end('x')
+          child.kill()
+          await closed
+        } })
+      } catch { child.kill(); reject(new Error('Invalid native metadata response')) }
+    }
+    child.stdout!.on('data', (chunk: Buffer) => {
+      if (Buffer.byteLength(output) + chunk.length > 65_536) { oversized = true; child.kill() }
+      else { output += chunk.toString('utf8'); if (mode === '--hold' && output.endsWith('\n')) parseOutput() }
+    })
+    child.stderr!.on('data', (chunk: Buffer) => { if (errorOutput.length < 1024) errorOutput += chunk.toString('utf8').slice(0, 1024) })
+    child.on('error', (e) => { clearTimeout(timeout); reject(e) })
+    child.on('close', (status) => {
+      childClosed = true
+      clearTimeout(timeout)
+      if (settled) return
+      if (status !== 0 || oversized || signal?.aborted) { reject(new Error(`Native metadata verification refused (${errorOutput.trim() || 'cancelled or unavailable'})`)); return }
+      parseOutput()
     })
   })
 }
@@ -149,7 +165,7 @@ export function registerSources(app: Hono, security: LocalSecurity, store: Store
       pending.set(requestId, active)
       const generation = generations.get(scope.path) ?? 0
       const check = () => { if (active.controller.signal.aborted || generation !== (generations.get(scope.path) ?? 0)) throw new Error('Preview cancelled or source permission changed; preview again') }
-      const native = process.platform === 'win32' ? await nativePreview(scope.path, dataHome, '--preview', active.controller.signal) : undefined
+      const native = process.platform === 'win32' ? (await nativePreview(scope.path, dataHome, '--preview', active.controller.signal)).value : undefined
       const checked = native ? { ...scope, nativePath: native.nativePath } : await validate(scope, dataHome)
       check()
       for (const [id, ticket] of tickets) if (ticket.expires < Date.now()) tickets.delete(id)
@@ -179,7 +195,9 @@ export function registerSources(app: Hono, security: LocalSecurity, store: Store
       }
       check()
       const id = requestId
-      tickets.set(id, { ...checked, id, owner: c.req.header('x-friday-csrf')!, expires: Date.now() + TTL, identity: native?.identity, generation })
+      await store.registerApproval({ ...checked, id, owner: active.owner, expires: Date.now() + TTL, identity: native?.identity, generation })
+      try { check() } catch (e) { await store.cancelApproval(id, active.owner); throw e }
+      tickets.set(id, { ...checked, id, owner: active.owner, expires: Date.now() + TTL, identity: native?.identity, generation })
       return c.json({ previewId: id, path: scope.path, nativePath: checked.nativePath, host: scope.host, exclusions: scope.exclusions, sample, skipped, truncated: count > LIMIT, depth: 1, entryLimit: LIMIT, expiresInSeconds: TTL / 1000 })
     } catch (e) {
       if (process.platform === 'win32' && (e as NodeJS.ErrnoException)?.code === 'ENOENT' && String((e as Error).message).includes('source-preview.exe')) return c.json({ code: 'NATIVE_VERIFICATION_REQUIRED', error: 'Build the reviewed Windows metadata helper before preview; no source permission was granted.' }, 503)
@@ -191,11 +209,13 @@ export function registerSources(app: Hono, security: LocalSecurity, store: Store
     const body = await c.req.json().catch(() => null) as { previewId?: unknown } | null
     const ticket = tickets.get(String(body?.previewId))
     if (ticket && ticket.owner === c.req.header('x-friday-csrf')) tickets.delete(ticket.id)
+    await store.cancelApproval(String(body?.previewId), c.req.header('x-friday-csrf')!)
     const active = pending.get(String(body?.previewId))
     if (active && active.owner === c.req.header('x-friday-csrf')) active.controller.abort()
     return c.json({ cancelled: true })
   })
   app.post('/api/sources', security.mutationGuard, async (c) => {
+    let release: (() => Promise<void>) | undefined
     try {
       const body = await c.req.json() as { previewId?: unknown }
       const ticket = tickets.get(String(body?.previewId))
@@ -204,14 +224,19 @@ export function registerSources(app: Hono, security: LocalSecurity, store: Store
       if (JSON.stringify([scope.path, scope.host, scope.exclusions]) !== JSON.stringify([ticket.path, ticket.host, ticket.exclusions])) throw new Error('Scope changed; preview again')
       const generation = generations.get(scope.path) ?? 0
       if (generation !== ticket.generation) throw new Error('Source permission changed; preview again')
-      const native = process.platform === 'win32' ? await nativePreview(scope.path, dataHome, '--identity') : undefined
+      const nativeLease = process.platform === 'win32' ? await nativePreview(scope.path, dataHome, '--hold') : undefined
+      release = nativeLease?.release
+      const leaseDeadline = nativeLease ? Date.now() + 15_000 : undefined
+      const native = nativeLease?.value
       const checked = native ? { ...scope, nativePath: native.nativePath } : await validate(scope, dataHome)
       if (!tickets.has(ticket.id)) throw new Error('Preview cancelled or source permission changed; preview again')
       if (generation !== (generations.get(scope.path) ?? 0) || checked.nativePath !== ticket.nativePath || (native && native.identity !== ticket.identity)) throw new Error('Folder identity changed; preview again')
-      tickets.delete(ticket.id)
       const source: Source = { ...checked, id: randomUUID(), enabled: true, revision: 1, health: 'ready' }
-      return c.json(await store.addSource(source))
+      const saved = await store.approveSource(ticket.id, ticket.owner, source, native?.identity, generation, leaseDeadline)
+      tickets.delete(ticket.id)
+      return c.json(saved)
     } catch (e) { return c.json(error(e), 400) }
+    finally { await release?.() }
   })
   app.patch('/api/sources/:id', security.mutationGuard, async (c) => {
     const body = await c.req.json().catch(() => null) as { enabled?: unknown; expectedRevision?: unknown } | null
@@ -221,6 +246,7 @@ export function registerSources(app: Hono, security: LocalSecurity, store: Store
       if (!existing || existing.revision !== body.expectedRevision) throw new Error('Source changed or was removed; refresh before disabling')
       invalidate(existing.path)
       invalidate(existing.nativePath)
+      await store.invalidateApprovals([existing.path, existing.nativePath])
       const disabled = await store.disableSource(c.req.param('id'), body.expectedRevision as number)
       for (const [id, ticket] of tickets) if (ticket.nativePath === disabled.nativePath) tickets.delete(id)
       return c.json(disabled)
@@ -230,6 +256,7 @@ export function registerSources(app: Hono, security: LocalSecurity, store: Store
   app.delete('/api/sources/:id', security.mutationGuard, async (c) => {
     const source = (await store.listSources()).find((item) => item.id === c.req.param('id'))
     if (source) { invalidate(source.path); invalidate(source.nativePath) }
+    if (source) await store.invalidateApprovals([source.path, source.nativePath])
     return c.json({ revoked: await store.revokeSource(c.req.param('id')) })
   })
   return () => { tickets.clear(); for (const request of pending.values()) request.controller.abort() }

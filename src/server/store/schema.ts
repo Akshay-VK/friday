@@ -5,6 +5,7 @@ import { createBackup } from './backups.ts'
 
 export type ThemePreference = 'light' | 'dark' | 'system'
 export type Source = { id: string; path: string; nativePath: string; host: string; exclusions: string[]; enabled: boolean; revision: number; health: 'ready' | 'offline' | 'denied' | 'disabled' }
+export type Approval = { id: string; owner: string; expires: number; generation: number; path: string; nativePath: string; host: string; exclusions: string[]; identity?: string }
 
 export const THEMES: readonly ThemePreference[] = ['light', 'dark', 'system']
 const MIGRATION_2 = 'CREATE TABLE migration_history (version INTEGER PRIMARY KEY, checksum TEXT NOT NULL, applied_at TEXT NOT NULL)'
@@ -26,6 +27,10 @@ export type StoreWorkerInput =
   | { type: 'dailyBackup'; id: number; now?: string }
   | { type: 'listSources'; id: number }
   | { type: 'addSource'; id: number; source: Source }
+  | { type: 'registerApproval'; id: number; approval: Approval }
+  | { type: 'cancelApproval'; id: number; approvalId: string; owner: string }
+  | { type: 'approveSource'; id: number; approvalId: string; owner: string; source: Source; identity?: string; generation: number; leaseDeadline?: number }
+  | { type: 'invalidateApprovals'; id: number; paths: string[] }
   | { type: 'disableSource'; id: number; sourceId: string; revision: number }
   | { type: 'setSourceHealth'; id: number; sourceId: string; revision: number; health: Source['health'] }
   | { type: 'revokeSource'; id: number; sourceId: string }

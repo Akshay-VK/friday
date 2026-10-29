@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtemp, mkdir, writeFile, readFile, readdir, lstat, symlink, rename, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
+import { spawn } from 'node:child_process'
 import { startFriday } from '../src/server/start.ts'
 import { bootstrap, mutationHeaders } from './helpers/harness.ts'
 
@@ -28,7 +29,11 @@ test('native Windows fixture: handle-bound preview, unchanged hidden files, iden
       hidden: await readFile(join(root, '.git', 'config'), 'utf8'), ordinary: await readFile(join(root, 'normal.txt'), 'utf8') }
   }
   const before = await snapshot()
+  const previousDiagnostics = process.env.FRIDAY_DIAGNOSTICS
+  process.env.FRIDAY_DIAGNOSTICS = '1'
   const host = await startFriday({ dataHome: home, port: 0 })
+  if (previousDiagnostics === undefined) delete process.env.FRIDAY_DIAGNOSTICS
+  else process.env.FRIDAY_DIAGNOSTICS = previousDiagnostics
   t.after(async () => { await host.close(); await rm(base, { recursive: true, force: true }) })
   const session = await bootstrap(host.url)
   const headers = mutationHeaders(host.url, session.cookie, session.body.csrfToken)
@@ -64,6 +69,11 @@ test('native Windows fixture: handle-bound preview, unchanged hidden files, iden
   assert.notEqual((await mutate('POST', '', { ...scope, previewId: second.previewId })).status, 200, 'replacement root must fail approval')
   await rm(root, { recursive: true, force: true })
   await rename(swapped, root)
+  const contested = await (await mutate('POST', '/preview', scope)).json() as { previewId: string }
+  const approvals = await Promise.all([mutate('POST', '', { ...scope, previewId: contested.previewId }), mutate('POST', '', { ...scope, previewId: contested.previewId })])
+  assert.deepEqual(approvals.map((result) => result.status).sort(), [200, 400], 'one preview cannot produce two grants')
+  const contestedGrant = await approvals.find((result) => result.status === 200)!.json() as { id: string }
+  assert.equal((await mutate('DELETE', `/${contestedGrant.id}`, {})).status, 200)
   const third = await (await mutate('POST', '/preview', scope)).json() as { previewId: string }
   const grantResponse = await mutate('POST', '', { ...scope, previewId: third.previewId })
   assert.equal(grantResponse.status, 200, await grantResponse.clone().text())
@@ -71,5 +81,36 @@ test('native Windows fixture: handle-bound preview, unchanged hidden files, iden
   assert.equal((await mutate('PATCH', `/${grant.id}`, { enabled: false, expectedRevision: grant.revision })).status, 200)
   assert.equal((await mutate('DELETE', `/${grant.id}`, {})).status, 200)
   assert.deepEqual(await (await fetch(`${host.url}/api/sources`)).json(), { sources: [] })
+  // Queue the grant behind a real store operation. Once the helper has opened
+  // its handles, the root must remain non-renamable until the grant is saved.
+  const fourth = await (await mutate('POST', '/preview', scope)).json() as { previewId: string }
+  const busy = fetch(`${host.url}/api/diagnostics/store-busy`, { method: 'POST', headers, body: JSON.stringify({ milliseconds: 5000 }) })
+  await new Promise((resolve) => setTimeout(resolve, 100))
+  let settled = false
+  const awaiting = mutate('POST', '', { ...scope, previewId: fourth.previewId }).then((response) => { settled = true; return response })
+  await new Promise((resolve) => setTimeout(resolve, 300))
+  assert.equal(settled, false, `approval should be queued behind store busy operation; diagnostic=${await (await busy).clone().text()}`)
+  let blocked = false
+  for (let i = 0; i < 30 && !blocked; i++) {
+    try { await rename(root, swapped); await rename(swapped, root) }
+    catch (e) { if (['EPERM', 'EACCES', 'EBUSY'].includes((e as NodeJS.ErrnoException).code ?? '')) blocked = true; else throw e }
+    if (!blocked) await new Promise((resolve) => setTimeout(resolve, 25))
+  }
+  assert.ok(blocked, `native root handle must prevent delete/rename sharing while approval is queued; approval=${await (await awaiting).clone().text()}`)
+  assert.equal((await busy).status, 200)
+  const fourthGrant = await awaiting
+  assert.equal(fourthGrant.status, 200, await fourthGrant.clone().text())
+  assert.equal((await mutate('DELETE', `/${(await fourthGrant.json() as { id: string }).id}`, {})).status, 200)
+  // A severed parent/process must not leave OS handles behind.
+  const helper = spawn(join(process.cwd(), 'native', 'source-preview.exe'), ['--hold', root, home], { stdio: ['pipe', 'pipe', 'pipe'] })
+  await new Promise<void>((resolve, reject) => {
+    helper.once('error', reject)
+    helper.stdout!.once('data', () => resolve())
+  })
+  await assert.rejects(rename(root, swapped), (e: unknown) => ['EPERM', 'EACCES', 'EBUSY'].includes((e as NodeJS.ErrnoException).code ?? ''))
+  helper.kill()
+  await new Promise<void>((resolve) => helper.once('close', () => resolve()))
+  await rename(root, swapped)
+  await rename(swapped, root)
   assert.deepEqual(await snapshot(), before, 'no fixture contents or metadata changed by preview/approval')
 })

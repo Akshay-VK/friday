@@ -29,6 +29,12 @@ let db: ReturnType<typeof openStore>
 let pending: { id: string; confirmation: string; revision: string; checksum: string; expires: number } | undefined
 let lastFailure: string | undefined
 const revision = () => createHash('sha256').update(JSON.stringify([db.prepare('SELECT * FROM preferences ORDER BY key').all(), db.prepare("SELECT name FROM sqlite_master WHERE name='sources'").get() ? listSources(db) : []])).digest('hex')
+const approvals = new Map<string, import('./schema.ts').Approval>()
+const generations = new Map<string, number>()
+function invalidate(paths: string[]) {
+  for (const path of paths) generations.set(path, (generations.get(path) ?? 0) + 1)
+  for (const [id, approval] of approvals) if (paths.includes(approval.path) || paths.includes(approval.nativePath)) approvals.delete(id)
+}
 try {
   mkdirSync(dataHome, { recursive: true })
   db = openStore(dataHome)
@@ -55,16 +61,46 @@ parentPort?.on('message', (message: StoreWorkerInput) => {
         pending = undefined
         send({ type: 'result', id: message.id, value: addSource(db, message.source) })
         break
+      case 'registerApproval': {
+        const a = message.approval
+        if (approvals.has(a.id) || a.expires <= Date.now()) throw new Error('Preview cancelled or source permission changed; preview again')
+        approvals.set(a.id, a)
+        send({ type: 'result', id: message.id, value: true })
+        break
+      }
+      case 'cancelApproval': {
+        const a = approvals.get(message.approvalId)
+        if (a?.owner === message.owner) approvals.delete(message.approvalId)
+        send({ type: 'result', id: message.id, value: true })
+        break
+      }
+      case 'invalidateApprovals':
+        invalidate(message.paths)
+        send({ type: 'result', id: message.id, value: true })
+        break
+      case 'approveSource': {
+        const a = approvals.get(message.approvalId)
+        const s = message.source
+        if (!a || a.owner !== message.owner || a.expires <= Date.now() || a.generation !== message.generation || a.identity !== message.identity ||
+          (s.host === 'windows' && (!message.leaseDeadline || message.leaseDeadline <= Date.now() + 3_000)) ||
+          JSON.stringify([a.path, a.nativePath, a.host, a.exclusions]) !== JSON.stringify([s.path, s.nativePath, s.host, s.exclusions])) throw new Error('Preview expired, cancelled or folder identity changed; preview again')
+        // The worker owns both the single-use ticket and the database write.
+        const value = db.transaction(() => addSource(db, s))()
+        approvals.delete(a.id)
+        pending = undefined
+        send({ type: 'result', id: message.id, value })
+        break
+      }
       case 'disableSource':
         pending = undefined
-        send({ type: 'result', id: message.id, value: disableSource(db, message.sourceId, message.revision) })
+        { const source = disableSource(db, message.sourceId, message.revision); invalidate([source.path, source.nativePath]); send({ type: 'result', id: message.id, value: source }) }
         break
       case 'setSourceHealth':
         send({ type: 'result', id: message.id, value: setSourceHealth(db, message.sourceId, message.revision, message.health) })
         break
       case 'revokeSource':
         pending = undefined
-        send({ type: 'result', id: message.id, value: db.prepare('DELETE FROM sources WHERE id=?').run(message.sourceId).changes > 0 })
+        { const source = listSources(db).find((item) => item.id === message.sourceId); const removed = db.prepare('DELETE FROM sources WHERE id=?').run(message.sourceId).changes > 0; if (source) invalidate([source.path, source.nativePath]); send({ type: 'result', id: message.id, value: removed }) }
         break
       case 'setTheme':
         pending = undefined
@@ -120,6 +156,7 @@ parentPort?.on('message', (message: StoreWorkerInput) => {
           for (const row of rows.preferences) insert.run(row)
           for (const source of rows.sources) addSource(db, { ...source, enabled: false, health: 'disabled', revision: source.revision + 1 })
         })()
+        invalidate([...new Set([...approvals.values()].flatMap((a) => [a.path, a.nativePath]))])
         lastFailure = undefined
         send({ type: 'result', id: message.id, value: { theme: getTheme(db) } })
         break

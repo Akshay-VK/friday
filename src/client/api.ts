@@ -111,7 +111,7 @@ export type Source = { id: string; path: string; nativePath: string; host: strin
 export type SourcePreview = { previewId: string; path: string; nativePath: string; host: string; exclusions: string[]; sample: string[]; skipped: string[]; truncated: boolean; depth: number; entryLimit: number }
 export function listSources(): Promise<{ sources: Source[] }> { return request('/api/sources') }
 export function pickSource(): Promise<{ kind: 'selected'; path: string } | { kind: 'cancelled' } | { kind: 'unavailable'; message: string }> { return protectedPost('/api/sources/pick') }
-export function previewSource(path: string, exclusions: string[]): Promise<SourcePreview> { return protectedPost('/api/sources/preview', { path, host: navigator.platform.startsWith('Win') ? 'windows' : 'local', exclusions }) }
+export function previewSource(path: string, exclusions: string[], requestId = crypto.randomUUID()): Promise<SourcePreview> { return protectedPost('/api/sources/preview', { path, host: navigator.platform.startsWith('Win') ? 'windows' : 'local', exclusions, requestId }) }
 export function cancelSource(previewId: string): Promise<{ cancelled: boolean }> { return protectedPost('/api/sources/cancel', { previewId }) }
 export function approveSource(preview: SourcePreview): Promise<Source> { return protectedPost('/api/sources', { previewId: preview.previewId, path: preview.path, host: preview.host, exclusions: preview.exclusions }) }
 export function disableSource(source: Source): Promise<Source> { return protectedSource(`/api/sources/${encodeURIComponent(source.id)}`, 'PATCH', { enabled: false, expectedRevision: source.revision }) }

@@ -11,7 +11,7 @@ import {
 } from './security.ts'
 import type { StoreClient } from './store/client.ts'
 import { isTheme } from './store/schema.ts'
-import { registerSources } from './sources.ts'
+import { registerSources, type SourceAdapters } from './sources.ts'
 
 export type FridayApp = {
   app: Hono
@@ -24,6 +24,7 @@ export function createApp(options: {
   store: StoreClient
   diagnostics?: boolean
   staticRoot?: string
+  sourceAdapters?: SourceAdapters
 }): FridayApp {
   const app = new Hono()
   const security = createLocalSecurity({
@@ -88,7 +89,7 @@ export function createApp(options: {
     return c.json({ theme: await options.store.setTheme(value) })
   })
 
-  const invalidatePreviews = registerSources(app, security, options.store, options.dataHome)
+  const invalidatePreviews = registerSources(app, security, options.store, options.dataHome, options.sourceAdapters)
 
   app.get('/api/backups', async (c) => c.json(await options.store.listBackups()))
   app.post('/api/backups/create', security.mutationGuard, async (c) => {

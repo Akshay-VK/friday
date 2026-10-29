@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { approveSource, cancelSource, disableSource, listSources, pickSource, previewSource, revokeSource, type Source, type SourcePreview } from './api.ts'
 
 export function Sources({ ready, refreshKey }: { ready: boolean; refreshKey: number }) {
@@ -8,6 +8,7 @@ export function Sources({ ready, refreshKey }: { ready: boolean; refreshKey: num
   const [preview, setPreview] = useState<SourcePreview | null>(null)
   const [message, setMessage] = useState('No local-read permission is configured. Nothing is scanned automatically.')
   const [busy, setBusy] = useState(false)
+  const pendingPreview = useRef<string | null>(null)
   useEffect(() => {
     if (ready) void listSources().then((state) => setSources(state.sources)).catch(() => setMessage('Could not load scan roots. Retry after reconnecting to Friday.'))
   }, [ready, refreshKey])
@@ -18,7 +19,9 @@ export function Sources({ ready, refreshKey }: { ready: boolean; refreshKey: num
     finally { setBusy(false) }
   }
   const cancel = () => void run(async () => {
-    if (preview) await cancelSource(preview.previewId)
+    const id = pendingPreview.current ?? preview?.previewId
+    pendingPreview.current = null
+    if (id) await cancelSource(id)
     setPreview(null)
     setMessage('Preview cancelled. No permission was saved.')
   })
@@ -28,8 +31,8 @@ export function Sources({ ready, refreshKey }: { ready: boolean; refreshKey: num
     <ul>{sources.map((source) => <li key={source.id}>
       <code>{source.path}</code> · {source.host} · {source.enabled ? 'Local reads permitted' : 'Disabled; no reads'} · {source.health}
       {source.exclusions.length > 0 && <span> · excludes {source.exclusions.join(', ')}</span>}{' '}
-      <button type="button" className="button button--quiet" disabled={!ready || busy || !source.enabled} onClick={() => void run(async () => { await disableSource(source); await refresh(); setMessage('Scan root disabled. To use it again, preview and approve a new scope.') })}>Disable</button>{' '}
-      <button type="button" className="button button--quiet" disabled={!ready || busy} onClick={() => void run(async () => { await revokeSource(source); await refresh(); setMessage('Scan root revoked.') })}>Revoke</button>
+      <button type="button" className="button button--quiet" disabled={!ready || !source.enabled} onClick={() => void run(async () => { await disableSource(source); pendingPreview.current = null; setPreview(null); await refresh(); setMessage('Scan root disabled. To use it again, preview and approve a new scope.') })}>Disable</button>{' '}
+      <button type="button" className="button button--quiet" disabled={!ready} onClick={() => void run(async () => { await revokeSource(source); pendingPreview.current = null; setPreview(null); await refresh(); setMessage('Scan root revoked.') })}>Revoke</button>
     </li>)}</ul>
     <div><label htmlFor="source-path">Native folder path</label>{' '}
       <input id="source-path" value={path} onChange={(event) => { setPath(event.target.value); setPreview(null) }} disabled={!ready || busy} autoComplete="off" />{' '}
@@ -37,11 +40,21 @@ export function Sources({ ready, refreshKey }: { ready: boolean; refreshKey: num
     </div>
     <div><label htmlFor="source-exclusions">Exclude top-level folders (comma separated)</label>{' '}
       <input id="source-exclusions" value={exclusions} onChange={(event) => { setExclusions(event.target.value); setPreview(null) }} disabled={!ready || busy} placeholder="e.g. .git, node_modules" /></div>
-    <button type="button" className="button button--primary" disabled={!ready || busy || !path || Boolean(preview)} onClick={() => void run(async () => {
-      const result = await previewSource(path, exclusions.split(',').map((part) => part.trim()).filter(Boolean))
-      setPreview(result)
-      setMessage('Temporary local preview only; no persistent grant yet.')
-    })}>Preview local reads temporarily</button>
+    <button type="button" className="button button--primary" disabled={!ready || busy || !path || Boolean(preview)} onClick={() => {
+      const id = crypto.randomUUID()
+      pendingPreview.current = id
+      setBusy(true)
+      void previewSource(path, exclusions.split(',').map((part) => part.trim()).filter(Boolean), id)
+        .then((result) => {
+          if (pendingPreview.current !== id) return
+          pendingPreview.current = null
+          setPreview(result)
+          setMessage('Temporary local preview only; no persistent grant yet.')
+        })
+        .catch((error: unknown) => { if (pendingPreview.current === id) { pendingPreview.current = null; setMessage(error instanceof Error ? error.message : String(error)) } })
+        .finally(() => setBusy(false))
+    }}>Preview local reads temporarily</button>
+    {busy && pendingPreview.current && <button type="button" className="button button--quiet" onClick={cancel}>Cancel pending preview</button>}
     {preview && <div role="group" aria-label="Review scan root">
       <p>Review exact scope: <code>{preview.path}</code> ({preview.host}); resolved native path <code>{preview.nativePath}</code>. Exclusions: {preview.exclusions.join(', ') || 'none'}.</p>
       <p>Metadata names only, depth {preview.depth}, first {preview.entryLimit} entries. {preview.truncated ? 'Truncated; more entries were not inspected.' : 'Within preview limit.'} Links skipped: {preview.skipped.join(', ') || 'none'}.</p>

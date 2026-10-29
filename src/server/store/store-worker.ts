@@ -16,6 +16,7 @@ import {
   listSources,
   addSource,
   disableSource,
+  setSourceHealth,
 } from './schema.ts'
 
 const { dataHome } = workerData as { dataHome: string }
@@ -57,6 +58,9 @@ parentPort?.on('message', (message: StoreWorkerInput) => {
       case 'disableSource':
         pending = undefined
         send({ type: 'result', id: message.id, value: disableSource(db, message.sourceId, message.revision) })
+        break
+      case 'setSourceHealth':
+        send({ type: 'result', id: message.id, value: setSourceHealth(db, message.sourceId, message.revision, message.health) })
         break
       case 'revokeSource':
         pending = undefined

@@ -106,6 +106,7 @@ export class StoreClient {
   listSources(): Promise<Source[]> { return this.#request({ type: 'listSources' }) }
   addSource(source: Source): Promise<Source> { return this.#request({ type: 'addSource', source }) }
   disableSource(sourceId: string, revision: number): Promise<Source> { return this.#request({ type: 'disableSource', sourceId, revision }) }
+  setSourceHealth(sourceId: string, revision: number, health: Source['health']): Promise<Source> { return this.#request({ type: 'setSourceHealth', sourceId, revision, health }) }
   revokeSource(sourceId: string): Promise<boolean> { return this.#request({ type: 'revokeSource', sourceId }) }
 
   createBackup(): Promise<{ id: string; counts: { preferences: number }; createdAt: string }> { return this.#request({ type: 'createBackup' }) }

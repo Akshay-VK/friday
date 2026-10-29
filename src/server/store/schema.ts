@@ -27,6 +27,7 @@ export type StoreWorkerInput =
   | { type: 'listSources'; id: number }
   | { type: 'addSource'; id: number; source: Source }
   | { type: 'disableSource'; id: number; sourceId: string; revision: number }
+  | { type: 'setSourceHealth'; id: number; sourceId: string; revision: number; health: Source['health'] }
   | { type: 'revokeSource'; id: number; sourceId: string }
   | { type: 'close'; id: number }
 
@@ -107,6 +108,13 @@ export function addSource(db: Database.Database, source: Source): Source {
 export function disableSource(db: Database.Database, id: string, revision: number): Source {
   if (!db.prepare("UPDATE sources SET enabled=0, health='disabled', revision=revision+1 WHERE id=? AND revision=?").run(id, revision).changes) throw new Error('Source changed or was removed; refresh before disabling')
   return listSources(db).find((source) => source.id === id)!
+}
+
+export function setSourceHealth(db: Database.Database, id: string, revision: number, health: Source['health']): Source {
+  db.prepare('UPDATE sources SET health=? WHERE id=? AND revision=? AND enabled=1').run(health, id, revision)
+  const source = listSources(db).find((item) => item.id === id)
+  if (!source) throw new Error('Source was removed')
+  return source
 }
 
 export function getTheme(db: Database.Database): ThemePreference {

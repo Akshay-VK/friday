@@ -17,10 +17,11 @@ export async function startHarness(options: {
   dataHome?: string
   keepDataHome?: boolean
   env?: Record<string, string>
+  nodeArgs?: string[]
 } = {}): Promise<Harness> {
   const dataHome =
     options.dataHome ?? (await mkdtemp(join(tmpdir(), 'friday-test-')))
-  const child = spawn(process.execPath, ['src/server/main.ts'], {
+  const child = spawn(process.execPath, [...(options.nodeArgs ?? []), 'src/server/main.ts'], {
     cwd: root,
     env: {
       ...process.env,
@@ -40,7 +41,7 @@ export async function startHarness(options: {
   const url = await new Promise<string>((resolve, reject) => {
     let stdout = ''
     const timeout = setTimeout(
-      () => reject(new Error(`server did not start\n${stderr}`)),
+      () => { child.kill('SIGKILL'); reject(new Error(`server did not start\n${stderr}`)) },
       15_000,
     )
     child.stdout!.setEncoding('utf8')
@@ -57,6 +58,7 @@ export async function startHarness(options: {
       clearTimeout(timeout)
       reject(new Error(`server exited before ready (${code})\n${stderr}`))
     })
+    child.once('error', (error) => { clearTimeout(timeout); reject(error) })
   })
 
   const stop = async () => {
@@ -64,6 +66,7 @@ export async function startHarness(options: {
       if (child.connected) child.send('friday:shutdown')
       else child.kill('SIGTERM')
       await new Promise<void>((resolve) => {
+        if (child.exitCode !== null || child.signalCode !== null) { resolve(); return }
         const timeout = setTimeout(() => child.kill('SIGKILL'), 3_000)
         child.once('exit', () => {
           clearTimeout(timeout)

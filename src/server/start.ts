@@ -4,10 +4,12 @@ import { createApp } from './app.ts'
 import { resolveDataHome, resolvePort } from './config.ts'
 import { acquireDataHomeLock } from './lock.ts'
 import { StoreClient } from './store/client.ts'
+import type { SourceAdapters } from './sources.ts'
 
 export async function startFriday(options?: {
   dataHome?: string
   port?: number
+  sourceAdapters?: SourceAdapters
 }) {
   const dataHome = resolveDataHome(
     options?.dataHome ?? process.env.FRIDAY_DATA_HOME,
@@ -32,6 +34,7 @@ export async function startFriday(options?: {
     getPort: () => boundPort,
     dataHome,
     store,
+    sourceAdapters: options?.sourceAdapters,
     diagnostics: process.env.FRIDAY_DIAGNOSTICS === '1',
     staticRoot: fileURLToPath(new URL('../../dist/', import.meta.url)),
   })

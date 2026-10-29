@@ -2,17 +2,51 @@ import { randomUUID } from 'node:crypto'
 import { lstat, realpath, opendir } from 'node:fs/promises'
 import { isAbsolute, relative, resolve, sep, win32 } from 'node:path'
 import { spawn } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
 import type { Hono } from 'hono'
 import type { LocalSecurity } from './security.ts'
 import type { StoreClient } from './store/client.ts'
 import type { Source } from './store/schema.ts'
 
 type Scope = { path: string; nativePath: string; host: 'local' | 'windows'; exclusions: string[] }
-type Ticket = Scope & { id: string; owner: string; expires: number }
+type Ticket = Scope & { id: string; owner: string; expires: number; identity?: string; generation: number }
 export type PickerResult = { kind: 'selected'; path: string } | { kind: 'cancelled' } | { kind: 'unavailable'; message: string }
 export type SourceAdapters = { pick?: () => Promise<PickerResult>; inspectEntry?: (path: string, signal: AbortSignal) => ReturnType<typeof lstat>; checkRoot?: (path: string) => ReturnType<typeof lstat> }
 const LIMIT = 48
 const TTL = 2 * 60_000
+const WINDOWS_HELPER = fileURLToPath(new URL('../../native/source-preview.exe', import.meta.url))
+type NativeResult = { version: 1; nativePath: string; identity: string; sample: string[]; skipped: string[]; truncated: boolean }
+
+function nativePreview(path: string, home: string, mode: '--preview' | '--identity', signal?: AbortSignal): Promise<NativeResult> {
+  return new Promise((resolveResult, reject) => {
+    if (signal?.aborted) { reject(new Error('Preview cancelled')); return }
+    const child = spawn(WINDOWS_HELPER, [mode, path, home], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], signal })
+    let output = ''
+    let errorOutput = ''
+    let oversized = false
+    const timeout = setTimeout(() => { child.kill(); reject(new Error('Native metadata preview timed out')) }, 5_000)
+    child.stdout.on('data', (chunk: Buffer) => {
+      if (Buffer.byteLength(output) + chunk.length > 65_536) { oversized = true; child.kill() }
+      else output += chunk.toString('utf8')
+    })
+    child.stderr.on('data', (chunk: Buffer) => { if (errorOutput.length < 1024) errorOutput += chunk.toString('utf8').slice(0, 1024) })
+    child.on('error', (e) => { clearTimeout(timeout); reject(e) })
+    child.on('close', (status) => {
+      clearTimeout(timeout)
+      if (status !== 0 || oversized || signal?.aborted) { reject(new Error(`Native metadata verification refused (${errorOutput.trim() || 'cancelled or unavailable'})`)); return }
+      try {
+        const result: unknown = JSON.parse(output)
+        const value = result as NativeResult
+        const names = (items: unknown): items is string[] => Array.isArray(items) && items.length <= LIMIT && items.every((item) => typeof item === 'string' && item.length > 0 && item.length < 1024 && item !== '.' && item !== '..' && !/[\\/:\0]/.test(item))
+        if (value.version !== 1 || typeof value.nativePath !== 'string' || !validPath(value.nativePath) || value.nativePath.toLowerCase() !== path.toLowerCase() ||
+            typeof value.identity !== 'string' || !/^[a-f0-9]{16}-[a-f0-9]{32}$/.test(value.identity) ||
+            !names(value.sample) || !names(value.skipped) || value.sample.length + value.skipped.length > LIMIT ||
+            typeof value.truncated !== 'boolean' || (mode === '--identity' && (value.sample.length !== 0 || value.skipped.length !== 0 || value.truncated))) throw new Error('Invalid native metadata response')
+        resolveResult(value)
+      } catch { reject(new Error('Invalid native metadata response')) }
+    })
+  })
+}
 
 function inside(parent: string, child: string) {
   const part = relative(parent, child)
@@ -22,7 +56,7 @@ function inside(parent: string, child: string) {
 function validPath(value: unknown): value is string {
   if (typeof value !== 'string' || !value || value.includes('\0') || value.split(/[\\/]/).includes('..')) return false
   if (process.platform === 'win32') {
-    if (!/^[A-Za-z]:\\[^\\]/.test(value) || value.includes('/') || value.includes('\\.\\') || value.includes('\\?\\')) return false
+    if (!/^[A-Za-z]:\\[^\\]/.test(value) || value.length >= 1024 || value.includes('/') || value.includes('~') || /[ :.]$/.test(value) || value.split('\\').slice(1).some((part) => !part || /[ .]$/.test(part) || part.includes(':') || /[\x00-\x1f]/.test(part))) return false
     return win32.normalize(value) === value && win32.parse(value).root !== value
   }
   return isAbsolute(value) && resolve(value) === value && value !== '/'
@@ -107,9 +141,6 @@ export function registerSources(app: Hono, security: LocalSecurity, store: Store
       const body = await c.req.json() as { requestId?: unknown; host?: unknown }
       if (body.host === 'wsl') return c.json({ code: 'WSL_MAPPING_UNVERIFIED', error: 'WSL roots require an explicitly selected distro and verified native mapping; this host cannot preview them yet.' }, 503)
       const scope = parse(body)
-      // Windows metadata/reparse and handle-bound containment need independent native proof.
-      // Refuse preview instead of hydrating unknown placeholders or racing junctions.
-      if (process.platform === 'win32') return c.json({ code: 'NATIVE_VERIFICATION_REQUIRED', error: 'Windows placeholder-safe and handle-bound preview is not yet verified; no folder was read.' }, 503)
       if (body.requestId !== undefined) {
         if (typeof body.requestId !== 'string' || !/^[a-f0-9-]{36}$/i.test(body.requestId) || pending.has(body.requestId) || tickets.has(body.requestId)) throw new Error('Invalid or duplicate preview request ID')
         requestId = body.requestId
@@ -118,32 +149,42 @@ export function registerSources(app: Hono, security: LocalSecurity, store: Store
       pending.set(requestId, active)
       const generation = generations.get(scope.path) ?? 0
       const check = () => { if (active.controller.signal.aborted || generation !== (generations.get(scope.path) ?? 0)) throw new Error('Preview cancelled or source permission changed; preview again') }
-      const checked = await validate(scope, dataHome)
+      const native = process.platform === 'win32' ? await nativePreview(scope.path, dataHome, '--preview', active.controller.signal) : undefined
+      const checked = native ? { ...scope, nativePath: native.nativePath } : await validate(scope, dataHome)
       check()
       for (const [id, ticket] of tickets) if (ticket.expires < Date.now()) tickets.delete(id)
       if (tickets.size >= 32) return c.json({ code: 'PREVIEW_BUSY', error: 'Too many pending previews. Cancel an earlier preview or retry after two minutes.' }, 429)
       const sample: string[] = []
       const skipped: string[] = []
       let count = 0
-      const handle = await opendir(checked.nativePath)
-      try {
-        for await (const entry of handle) {
-          if (++count > LIMIT) break
-          const name = entry.name
-          if (scope.exclusions.includes(name)) continue
-          const path = resolve(checked.nativePath, name)
-          check()
-          const info = await (adapters.inspectEntry ? adapters.inspectEntry(path, active.controller.signal) : lstat(path))
-          check()
-          if (info.isSymbolicLink()) skipped.push(name)
-          else sample.push(name)
-        }
-      } finally { await handle.close().catch(() => undefined) }
+      if (native) {
+        sample.push(...native.sample.filter((name) => !scope.exclusions.includes(name)))
+        skipped.push(...native.skipped.filter((name) => !scope.exclusions.includes(name)))
+        count = native.truncated ? LIMIT + 1 : native.sample.length + native.skipped.length
+      } else {
+        const handle = await opendir(checked.nativePath)
+        try {
+          for await (const entry of handle) {
+            if (++count > LIMIT) break
+            const name = entry.name
+            if (scope.exclusions.includes(name)) continue
+            const path = resolve(checked.nativePath, name)
+            check()
+            const info = await (adapters.inspectEntry ? adapters.inspectEntry(path, active.controller.signal) : lstat(path))
+            check()
+            if (info.isSymbolicLink()) skipped.push(name)
+            else sample.push(name)
+          }
+        } finally { await handle.close().catch(() => undefined) }
+      }
       check()
       const id = requestId
-      tickets.set(id, { ...checked, id, owner: c.req.header('x-friday-csrf')!, expires: Date.now() + TTL })
+      tickets.set(id, { ...checked, id, owner: c.req.header('x-friday-csrf')!, expires: Date.now() + TTL, identity: native?.identity, generation })
       return c.json({ previewId: id, path: scope.path, nativePath: checked.nativePath, host: scope.host, exclusions: scope.exclusions, sample, skipped, truncated: count > LIMIT, depth: 1, entryLimit: LIMIT, expiresInSeconds: TTL / 1000 })
-    } catch (e) { return c.json(error(e), 400) }
+    } catch (e) {
+      if (process.platform === 'win32' && (e as NodeJS.ErrnoException)?.code === 'ENOENT' && String((e as Error).message).includes('source-preview.exe')) return c.json({ code: 'NATIVE_VERIFICATION_REQUIRED', error: 'Build the reviewed Windows metadata helper before preview; no source permission was granted.' }, 503)
+      return c.json(error(e), 400)
+    }
     finally { if (requestId) pending.delete(requestId) }
   })
   app.post('/api/sources/cancel', security.mutationGuard, async (c) => {
@@ -161,9 +202,12 @@ export function registerSources(app: Hono, security: LocalSecurity, store: Store
       if (!ticket || ticket.owner !== c.req.header('x-friday-csrf') || ticket.expires < Date.now()) throw new Error('Preview expired or cancelled; preview again')
       const scope = parse(body)
       if (JSON.stringify([scope.path, scope.host, scope.exclusions]) !== JSON.stringify([ticket.path, ticket.host, ticket.exclusions])) throw new Error('Scope changed; preview again')
-      const checked = await validate(scope, dataHome)
+      const generation = generations.get(scope.path) ?? 0
+      if (generation !== ticket.generation) throw new Error('Source permission changed; preview again')
+      const native = process.platform === 'win32' ? await nativePreview(scope.path, dataHome, '--identity') : undefined
+      const checked = native ? { ...scope, nativePath: native.nativePath } : await validate(scope, dataHome)
       if (!tickets.has(ticket.id)) throw new Error('Preview cancelled or source permission changed; preview again')
-      if (checked.nativePath !== ticket.nativePath) throw new Error('Folder identity changed; preview again')
+      if (generation !== (generations.get(scope.path) ?? 0) || checked.nativePath !== ticket.nativePath || (native && native.identity !== ticket.identity)) throw new Error('Folder identity changed; preview again')
       tickets.delete(ticket.id)
       const source: Source = { ...checked, id: randomUUID(), enabled: true, revision: 1, health: 'ready' }
       return c.json(await store.addSource(source))

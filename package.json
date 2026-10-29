@@ -9,6 +9,7 @@
   },
   "scripts": {
     "build": "vite build",
+    "build:native:windows": "x86_64-w64-mingw32-gcc -std=c11 -municode -O2 -Wall native/source-preview.c -o native/source-preview.exe",
     "start": "node src/server/main.ts",
     "dev": "npm run build && npm start",
     "typecheck": "tsc --noEmit",

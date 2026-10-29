@@ -23,18 +23,19 @@ test('native Windows fixture: handle-bound preview, unchanged hidden files, iden
   await symlink(outside, join(root, 'escape'), 'junction')
   await symlink(root, join(root, 'cycle'), 'junction')
   await symlink(root, join(base, 'root-alias'), 'junction')
+  let proceed: (() => void) | undefined
   const snapshot = async () => {
     const names = await readdir(root)
     return { names, metadata: await Promise.all(names.map(async (name) => { const stat = await lstat(join(root, name)); return [name, stat.size, stat.mtimeMs, stat.isSymbolicLink()] })),
       hidden: await readFile(join(root, '.git', 'config'), 'utf8'), ordinary: await readFile(join(root, 'normal.txt'), 'utf8') }
   }
   const before = await snapshot()
-  const previousDiagnostics = process.env.FRIDAY_DIAGNOSTICS
-  process.env.FRIDAY_DIAGNOSTICS = '1'
-  const host = await startFriday({ dataHome: home, port: 0 })
-  if (previousDiagnostics === undefined) delete process.env.FRIDAY_DIAGNOSTICS
-  else process.env.FRIDAY_DIAGNOSTICS = previousDiagnostics
-  t.after(async () => { await host.close(); await rm(base, { recursive: true, force: true }) })
+  let holdNext: { entered: () => void; proceed: Promise<void>; interrupt?: boolean } | undefined
+  const host = await startFriday({ dataHome: home, port: 0, sourceAdapters: { onNativeHold: async (stop) => {
+    const held = holdNext
+    if (held) { holdNext = undefined; held.entered(); await held.proceed; if (held.interrupt) await stop() }
+  } } })
+  t.after(async () => { proceed?.(); await host.close(); await rm(base, { recursive: true, force: true }) })
   const session = await bootstrap(host.url)
   const headers = mutationHeaders(host.url, session.cookie, session.body.csrfToken)
   const mutate = (method: string, route: string, body: object) => fetch(`${host.url}/api/sources${route}`, { method, headers, body: JSON.stringify(body) })
@@ -81,26 +82,36 @@ test('native Windows fixture: handle-bound preview, unchanged hidden files, iden
   assert.equal((await mutate('PATCH', `/${grant.id}`, { enabled: false, expectedRevision: grant.revision })).status, 200)
   assert.equal((await mutate('DELETE', `/${grant.id}`, {})).status, 200)
   assert.deepEqual(await (await fetch(`${host.url}/api/sources`)).json(), { sources: [] })
-  // Queue the grant behind a real store operation. Once the helper has opened
-  // its handles, the root must remain non-renamable until the grant is saved.
+  // Rendezvous after native validation, while its handles are still open.
   const fourth = await (await mutate('POST', '/preview', scope)).json() as { previewId: string }
-  const busy = fetch(`${host.url}/api/diagnostics/store-busy`, { method: 'POST', headers, body: JSON.stringify({ milliseconds: 5000 }) })
-  await new Promise((resolve) => setTimeout(resolve, 100))
-  let settled = false
-  const awaiting = mutate('POST', '', { ...scope, previewId: fourth.previewId }).then((response) => { settled = true; return response })
-  await new Promise((resolve) => setTimeout(resolve, 1500))
-  assert.equal(settled, false, `approval should be queued behind store busy operation; diagnostic=${await (await busy).clone().text()}`)
-  let blocked = false
-  for (let i = 0; i < 30 && !blocked; i++) {
-    try { await rename(root, swapped); await rename(swapped, root) }
-    catch (e) { if (['EPERM', 'EACCES', 'EBUSY'].includes((e as NodeJS.ErrnoException).code ?? '')) blocked = true; else throw e }
-    if (!blocked) await new Promise((resolve) => setTimeout(resolve, 25))
-  }
-  assert.ok(blocked, `native root handle must prevent delete/rename sharing while approval is queued; approval=${await (await awaiting).clone().text()}`)
-  assert.equal((await busy).status, 200)
+  let entered!: () => void
+  let reached = new Promise<void>((resolve) => { entered = resolve })
+  let release = new Promise<void>((resolve) => { proceed = resolve })
+  holdNext = { entered, proceed: release }
+  const awaiting = mutate('POST', '', { ...scope, previewId: fourth.previewId })
+  await reached
+  await assert.rejects(rename(root, swapped), (e: unknown) => ['EPERM', 'EACCES', 'EBUSY'].includes((e as NodeJS.ErrnoException).code ?? ''))
+  proceed?.()
   const fourthGrant = await awaiting
   assert.equal(fourthGrant.status, 200, await fourthGrant.clone().text())
   assert.equal((await mutate('DELETE', `/${(await fourthGrant.json() as { id: string }).id}`, {})).status, 200)
+  const cancelled = await (await mutate('POST', '/preview', scope)).json() as { previewId: string }
+  reached = new Promise<void>((resolve) => { entered = resolve })
+  release = new Promise<void>((resolve) => { proceed = resolve })
+  holdNext = { entered, proceed: release }
+  const interrupted = mutate('POST', '', { ...scope, previewId: cancelled.previewId })
+  await reached
+  assert.equal((await mutate('POST', '/cancel', { previewId: cancelled.previewId })).status, 200)
+  proceed?.()
+  assert.notEqual((await interrupted).status, 200, 'cancel during validation must not persist a grant')
+  const broken = await (await mutate('POST', '/preview', scope)).json() as { previewId: string }
+  reached = new Promise<void>((resolve) => { entered = resolve })
+  release = new Promise<void>((resolve) => { proceed = resolve })
+  holdNext = { entered, proceed: release, interrupt: true }
+  const lostHelper = mutate('POST', '', { ...scope, previewId: broken.previewId })
+  await reached
+  proceed?.()
+  assert.notEqual((await lostHelper).status, 200, 'interrupted helper cannot authorize a grant')
   // A severed parent/process must not leave OS handles behind.
   const helper = spawn(join(process.cwd(), 'native', 'source-preview.exe'), ['--hold', root, home], { stdio: ['pipe', 'pipe', 'pipe'] })
   await new Promise<void>((resolve, reject) => {

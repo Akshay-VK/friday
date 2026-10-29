@@ -11,7 +11,7 @@ import type { Source } from './store/schema.ts'
 type Scope = { path: string; nativePath: string; host: 'local' | 'windows'; exclusions: string[] }
 type Ticket = Scope & { id: string; owner: string; expires: number; identity?: string; generation: number }
 export type PickerResult = { kind: 'selected'; path: string } | { kind: 'cancelled' } | { kind: 'unavailable'; message: string }
-export type SourceAdapters = { pick?: () => Promise<PickerResult>; inspectEntry?: (path: string, signal: AbortSignal) => ReturnType<typeof lstat>; checkRoot?: (path: string) => ReturnType<typeof lstat> }
+export type SourceAdapters = { pick?: () => Promise<PickerResult>; inspectEntry?: (path: string, signal: AbortSignal) => ReturnType<typeof lstat>; checkRoot?: (path: string) => ReturnType<typeof lstat>; onNativeHold?: (release: () => Promise<void>) => Promise<void> }
 const LIMIT = 48
 const TTL = 2 * 60_000
 const WINDOWS_HELPER = fileURLToPath(new URL('../../native/source-preview.exe', import.meta.url))
@@ -230,6 +230,7 @@ export function registerSources(app: Hono, security: LocalSecurity, store: Store
       const nativeLease = process.platform === 'win32' ? await nativePreview(scope.path, dataHome, '--hold') : undefined
       release = nativeLease?.release
       const leaseDeadline = nativeLease ? Date.now() + 15_000 : undefined
+      if (nativeLease) await adapters.onNativeHold?.(nativeLease.release)
       const native = nativeLease?.value
       const checked = native ? { ...scope, nativePath: native.nativePath } : await validate(scope, dataHome)
       if (!tickets.has(ticket.id)) throw new Error('Preview cancelled or source permission changed; preview again')

@@ -1,9 +1,13 @@
 import Database from 'better-sqlite3'
 import { join } from 'node:path'
+import { createHash } from 'node:crypto'
+import { createBackup } from './backups.ts'
 
 export type ThemePreference = 'light' | 'dark' | 'system'
 
 export const THEMES: readonly ThemePreference[] = ['light', 'dark', 'system']
+const MIGRATION_2 = 'CREATE TABLE migration_history (version INTEGER PRIMARY KEY, checksum TEXT NOT NULL, applied_at TEXT NOT NULL)'
+const MIGRATION_2_HASH = createHash('sha256').update(MIGRATION_2).digest('hex')
 
 export function isTheme(value: unknown): value is ThemePreference {
   return typeof value === 'string' && THEMES.includes(value as ThemePreference)
@@ -14,6 +18,11 @@ export type StoreWorkerInput =
   | { type: 'setTheme'; id: number; theme: ThemePreference }
   | { type: 'searchActions'; id: number; query: string; limit: number }
   | { type: 'diagnosticsBusy'; id: number; milliseconds: number }
+  | { type: 'createBackup'; id: number; kind?: string; now?: string }
+  | { type: 'listBackups'; id: number }
+  | { type: 'previewRestore'; id: number; backupId: string }
+  | { type: 'restore'; id: number; backupId: string; confirmation: string }
+  | { type: 'dailyBackup'; id: number; now?: string }
   | { type: 'close'; id: number }
 
 export type StoreWorkerOutput =
@@ -27,12 +36,13 @@ export function openStore(dataHome: string) {
   db.pragma('synchronous = NORMAL')
   db.pragma('busy_timeout = 2000')
   db.pragma('foreign_keys = ON')
-  migrate(db)
+  migrate(db, dataHome)
   return db
 }
 
-function migrate(db: Database.Database) {
+function migrate(db: Database.Database, dataHome: string) {
   const version = db.pragma('user_version', { simple: true }) as number
+  if (version > 2) throw new Error('Store schema is newer than this Friday version; update Friday, do not downgrade the data')
   if (version < 1) {
     db.transaction(() => {
       db.exec(`
@@ -60,6 +70,18 @@ function migrate(db: Database.Database) {
       `)
     })()
   }
+  if (version === 1) createBackup(db, dataHome, 'pre-migration')
+  if (version === 1 && process.env.FRIDAY_DIAGNOSTICS === '1' && process.env.FRIDAY_TEST_MIGRATION_FAILURE === '1') throw new Error('Injected migration interruption after protected copy')
+  // v1 is the known baseline; its first upgrade is protected before the schema changes.
+  if ((db.pragma('user_version', { simple: true }) as number) === 1) {
+    db.transaction(() => {
+      db.exec(MIGRATION_2)
+      db.prepare('INSERT INTO migration_history (version, checksum, applied_at) VALUES (2, ?, ?)').run(MIGRATION_2_HASH, new Date().toISOString())
+      db.pragma('user_version = 2')
+    })()
+  }
+  const applied = db.prepare('SELECT version, checksum FROM migration_history').all() as Array<{ version: number; checksum: string }>
+  if (applied.length !== 1 || applied[0]?.version !== 2 || applied[0].checksum !== MIGRATION_2_HASH) throw new Error('Store migration record is incompatible; restore a verified copy or use a compatible Friday version')
 }
 
 export function getTheme(db: Database.Database): ThemePreference {

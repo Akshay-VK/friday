@@ -102,6 +102,12 @@ export class StoreClient {
     return this.#request({ type: 'getTheme' })
   }
 
+  createBackup(): Promise<{ id: string; counts: { preferences: number }; createdAt: string }> { return this.#request({ type: 'createBackup' }) }
+  listBackups(): Promise<{ backups: Array<{ id: string; createdAt: string; kind: string; counts: { preferences: number } }>; lastFailure?: string }> { return this.#request({ type: 'listBackups' }) }
+  previewRestore(backupId: string): Promise<{ confirmation: string; currentTheme: ThemePreference; restoredTheme: ThemePreference; counts: { preferences: number }; excluded: string[]; createdAt: string }> { return this.#request({ type: 'previewRestore', backupId }) }
+  restore(backupId: string, confirmation: string): Promise<{ theme: ThemePreference }> { return this.#request({ type: 'restore', backupId, confirmation }) }
+  dailyBackup(now?: string): Promise<boolean> { return this.#request({ type: 'dailyBackup', now }) }
+
   setTheme(theme: ThemePreference): Promise<ThemePreference> {
     return this.#request({ type: 'setTheme', theme })
   }

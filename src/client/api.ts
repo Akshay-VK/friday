@@ -94,3 +94,15 @@ export function searchActions(query: string): Promise<{
 }> {
   return request(`/api/search?q=${encodeURIComponent(query)}`)
 }
+
+export type Backup = { id: string; createdAt: string; kind: string; counts: { preferences: number } }
+export type RestorePreview = { confirmation: string; currentTheme: ThemePreference; restoredTheme: ThemePreference; counts: { preferences: number }; excluded: string[]; createdAt: string }
+
+function protectedPost<T>(path: string, body: object = {}): Promise<T> {
+  if (!csrfToken) return Promise.reject(new ApiError('Session authorisation is not available yet', 0))
+  return request(path, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Friday-CSRF': csrfToken }, body: JSON.stringify(body) })
+}
+export function listBackups(): Promise<{ backups: Backup[]; lastFailure?: string }> { return request('/api/backups') }
+export function createBackup(): Promise<Backup> { return protectedPost('/api/backups/create') }
+export function previewRestore(id: string): Promise<RestorePreview> { return protectedPost('/api/backups/restore-preview', { id }) }
+export function restoreBackup(id: string, confirmation: string): Promise<{ theme: ThemePreference }> { return protectedPost('/api/backups/restore', { id, confirmation }) }

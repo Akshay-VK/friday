@@ -101,6 +101,7 @@ export function mutationHeaders(
 export async function startHarnessExpectingFailure(options: {
   dataHome: string
   keepDataHome?: boolean
+  env?: Record<string, string>
 }): Promise<{ code: number | null; stdout: string; stderr: string }> {
   const child = spawn(process.execPath, ['src/server/main.ts'], {
     cwd: root,
@@ -108,6 +109,7 @@ export async function startHarnessExpectingFailure(options: {
       ...process.env,
       FRIDAY_DATA_HOME: options.dataHome,
       FRIDAY_PORT: '0',
+      ...options.env,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   })

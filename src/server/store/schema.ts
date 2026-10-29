@@ -29,7 +29,7 @@ export type StoreWorkerInput =
   | { type: 'addSource'; id: number; source: Source }
   | { type: 'registerApproval'; id: number; approval: Approval }
   | { type: 'cancelApproval'; id: number; approvalId: string; owner: string }
-  | { type: 'approveSource'; id: number; approvalId: string; owner: string; source: Source; identity?: string; generation: number; leaseDeadline?: number }
+  | { type: 'approveSource'; id: number; approvalId: string; owner: string; source: Source; identity?: string; generation: number; leaseDeadline?: number; lease?: SharedArrayBuffer }
   | { type: 'invalidateApprovals'; id: number; paths: string[] }
   | { type: 'disableSource'; id: number; sourceId: string; revision: number }
   | { type: 'setSourceHealth'; id: number; sourceId: string; revision: number; health: Source['health'] }

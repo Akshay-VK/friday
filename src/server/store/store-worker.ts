@@ -82,7 +82,7 @@ parentPort?.on('message', (message: StoreWorkerInput) => {
         const a = approvals.get(message.approvalId)
         const s = message.source
         if (!a || a.owner !== message.owner || a.expires <= Date.now() || a.generation !== message.generation || a.identity !== message.identity ||
-          (s.host === 'windows' && (!message.leaseDeadline || message.leaseDeadline <= Date.now() + 3_000)) ||
+          (s.host === 'windows' && (!message.lease || Atomics.load(new Int32Array(message.lease), 0) !== 1 || !message.leaseDeadline || message.leaseDeadline <= Date.now() + 3_000)) ||
           JSON.stringify([a.path, a.nativePath, a.host, a.exclusions]) !== JSON.stringify([s.path, s.nativePath, s.host, s.exclusions])) throw new Error('Preview expired, cancelled or folder identity changed; preview again')
         // The worker owns both the single-use ticket and the database write.
         const value = db.transaction(() => addSource(db, s))()

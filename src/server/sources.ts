@@ -17,7 +17,7 @@ const TTL = 2 * 60_000
 const WINDOWS_HELPER = fileURLToPath(new URL('../../native/source-preview.exe', import.meta.url))
 type NativeResult = { version: 1; nativePath: string; identity: string; sample: string[]; skipped: string[]; truncated: boolean }
 
-function nativePreview(path: string, home: string, mode: '--preview' | '--identity' | '--hold', signal?: AbortSignal): Promise<{ value: NativeResult; release: () => Promise<void> }> {
+function nativePreview(path: string, home: string, mode: '--preview' | '--identity' | '--hold', signal?: AbortSignal): Promise<{ value: NativeResult; lease?: SharedArrayBuffer; release: () => Promise<void> }> {
   return new Promise((resolveResult, reject) => {
     if (signal?.aborted) { reject(new Error('Preview cancelled')); return }
     const child = spawn(WINDOWS_HELPER, [mode, path, home], { windowsHide: true, stdio: [mode === '--hold' ? 'pipe' : 'ignore', 'pipe', 'pipe'], signal })
@@ -26,6 +26,7 @@ function nativePreview(path: string, home: string, mode: '--preview' | '--identi
     let oversized = false
     let settled = false
     let childClosed = false
+    const lease = mode === '--hold' ? new SharedArrayBuffer(4) : undefined
     const timeout = setTimeout(() => { child.kill(); reject(new Error('Native metadata preview timed out')) }, 5_000)
     const parseOutput = () => {
       if (settled) return
@@ -38,8 +39,9 @@ function nativePreview(path: string, home: string, mode: '--preview' | '--identi
             !names(value.sample) || !names(value.skipped) || value.sample.length + value.skipped.length > LIMIT ||
             typeof value.truncated !== 'boolean' || (mode !== '--preview' && (value.sample.length !== 0 || value.skipped.length !== 0 || value.truncated))) throw new Error('Invalid native metadata response')
         settled = true
+        if (lease) Atomics.store(new Int32Array(lease), 0, 1)
         clearTimeout(timeout)
-        resolveResult({ value, release: async () => {
+        resolveResult({ value, lease, release: async () => {
           if (childClosed) return
           const closed = new Promise<void>((resolve) => child.once('close', () => resolve()))
           child.stdin?.end('x')
@@ -56,6 +58,7 @@ function nativePreview(path: string, home: string, mode: '--preview' | '--identi
     child.on('error', (e) => { clearTimeout(timeout); reject(e) })
     child.on('close', (status) => {
       childClosed = true
+      if (lease) Atomics.store(new Int32Array(lease), 0, 0)
       clearTimeout(timeout)
       if (settled) return
       if (status !== 0 || oversized || signal?.aborted) { reject(new Error(`Native metadata verification refused (${errorOutput.trim() || 'cancelled or unavailable'})`)); return }
@@ -232,7 +235,7 @@ export function registerSources(app: Hono, security: LocalSecurity, store: Store
       if (!tickets.has(ticket.id)) throw new Error('Preview cancelled or source permission changed; preview again')
       if (generation !== (generations.get(scope.path) ?? 0) || checked.nativePath !== ticket.nativePath || (native && native.identity !== ticket.identity)) throw new Error('Folder identity changed; preview again')
       const source: Source = { ...checked, id: randomUUID(), enabled: true, revision: 1, health: 'ready' }
-      const saved = await store.approveSource(ticket.id, ticket.owner, source, native?.identity, generation, leaseDeadline)
+      const saved = await store.approveSource(ticket.id, ticket.owner, source, native?.identity, generation, leaseDeadline, nativeLease?.lease)
       tickets.delete(ticket.id)
       return c.json(saved)
     } catch (e) { return c.json(error(e), 400) }

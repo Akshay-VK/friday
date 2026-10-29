@@ -88,7 +88,7 @@ test('native Windows fixture: handle-bound preview, unchanged hidden files, iden
   await new Promise((resolve) => setTimeout(resolve, 100))
   let settled = false
   const awaiting = mutate('POST', '', { ...scope, previewId: fourth.previewId }).then((response) => { settled = true; return response })
-  await new Promise((resolve) => setTimeout(resolve, 300))
+  await new Promise((resolve) => setTimeout(resolve, 1500))
   assert.equal(settled, false, `approval should be queued behind store busy operation; diagnostic=${await (await busy).clone().text()}`)
   let blocked = false
   for (let i = 0; i < 30 && !blocked; i++) {

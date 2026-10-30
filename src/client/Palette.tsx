@@ -24,6 +24,7 @@ export function CommandPalette({
   const [activeIndex, setActiveIndex] = useState(0)
   const [searching, setSearching] = useState(false)
   const [notice, setNotice] = useState('')
+  const [retry, setRetry] = useState(0)
 
   useEffect(() => {
     const dialog = dialogRef.current
@@ -51,6 +52,7 @@ export function CommandPalette({
 
     let cancelled = false
     setSearching(true)
+    setVisible([])
     const timer = setTimeout(() => {
       void searchActions(trimmed)
         .then((payload) => {
@@ -76,7 +78,7 @@ export function CommandPalette({
       cancelled = true
       clearTimeout(timer)
     }
-  }, [query, actions])
+  }, [query, actions, retry])
 
   function move(direction: 1 | -1) {
     if (visible.length === 0) return
@@ -133,7 +135,7 @@ export function CommandPalette({
             } else if (event.key === 'End') {
               event.preventDefault()
               setActiveIndex(Math.max(visible.length - 1, 0))
-            } else if (event.key === 'Enter') {
+            } else if (event.key === 'Enter' && !event.shiftKey && !notice && !searching) {
               event.preventDefault()
               invokeActive()
             }
@@ -152,6 +154,7 @@ export function CommandPalette({
               ? 'No registered command matches that search.'
               : `${visible.length} registered ${visible.length === 1 ? 'command' : 'commands'}`)}
       </p>
+      {notice && <button type="button" className="button button--quiet" onClick={() => setRetry(value => value + 1)}>Retry search</button>}
 
       <ul className="palette__list" role="listbox" id={listId} aria-label="Commands">
         {visible.map((action, index) => (

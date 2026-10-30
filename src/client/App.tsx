@@ -1,687 +1,188 @@
-import {
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from 'react'
-import {
-  ApiError,
-  getBootstrap,
-  getHealth,
-  rememberCsrfToken,
-  saveTheme,
-  searchActions,
-  type ActionSummary,
-  type ThemePreference,
-  createBackup,
-  listBackups,
-  previewRestore,
-  restoreBackup,
-  type Backup,
-  type RestorePreview,
-} from './api.ts'
-import {
-  InfoIcon,
-  DatabaseIcon,
-  HomeIcon,
-  LockIcon,
-  MoonIcon,
-  PaletteIcon,
-  SearchIcon,
-  ServiceIcon,
-  SunIcon,
-  SystemIcon,
-} from './icons.tsx'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { ApiError, getBootstrap, getHealth, rememberCsrfToken, saveTheme, createBackup, listBackups, previewRestore, restoreBackup, type Backup, type RestorePreview, type ThemePreference } from './api.ts'
+import { HomeIcon, InfoIcon, SearchIcon, ServiceIcon, SunIcon, MoonIcon, SystemIcon, PaletteIcon } from './icons.tsx'
 import { CommandPalette } from './Palette.tsx'
 import { createActionRegistry, type ActionContext } from './registry.ts'
-import {
-  applyTheme,
-  resolveTheme,
-  systemPrefersDark,
-  THEME_OPTIONS,
-  watchSystemTheme,
-} from './theme.ts'
+import { applyTheme, resolveTheme, systemPrefersDark, THEME_OPTIONS, watchSystemTheme } from './theme.ts'
 
-type Phase = 'loading' | 'ready' | 'failed'
-
-type HealthState =
-  | { state: 'checking' }
-  | { state: 'ok'; version: string; checkedAt: string }
-  | { state: 'error'; message: string }
-
-const PLANNED_DESTINATIONS = [
-  'Projects',
-  'Sessions',
-  'Files',
-  'Docs',
-  'Tasks',
-] as const
-
-const THEME_ICONS = {
-  light: SunIcon,
-  dark: MoonIcon,
-  system: SystemIcon,
-} as const
+type Route = 'home' | 'settings'
+const THEME_ICONS = { light: SunIcon, dark: MoonIcon, system: SystemIcon }
 
 export function App() {
   const registry = useMemo(() => createActionRegistry(), [])
   const actions = useMemo(() => registry.list(), [registry])
-
-  const [phase, setPhase] = useState<Phase>('loading')
+  const [route, setRoute] = useState<Route>(location.pathname === '/settings' ? 'settings' : 'home')
+  const [menuOpen, setMenuOpen] = useState(false)
+  const [phase, setPhase] = useState<'loading' | 'ready' | 'failed'>('loading')
   const [loadError, setLoadError] = useState('')
   const [version, setVersion] = useState('0.1.0')
   const [theme, setTheme] = useState<ThemePreference>('system')
-  const [health, setHealth] = useState<HealthState>({ state: 'checking' })
+  const themeRef = useRef<ThemePreference>('system')
+  const [health, setHealth] = useState<{ checkedAt?: string; version?: string; error?: string }>({})
   const [announcement, setAnnouncement] = useState('')
   const [backups, setBackups] = useState<Backup[]>([])
   const [backupMessage, setBackupMessage] = useState('')
+  const [backupsStale, setBackupsStale] = useState(false)
   const [restorePlan, setRestorePlan] = useState<{ id: string; preview: RestorePreview } | null>(null)
+  const [restoreError, setRestoreError] = useState('')
   const [backupBusy, setBackupBusy] = useState(false)
-
-  const refreshBackups = useCallback(async () => {
-    const state = await listBackups()
-    setBackups(state.backups)
-    if (state.lastFailure) setBackupMessage(state.lastFailure)
-  }, [])
-
-  useEffect(() => {
-    if (phase !== 'ready') return
-    const timer = window.setInterval(() => {
-      void refreshBackups().catch(() => setBackupMessage('Could not check backups. Verify the Friday data home and retry.'))
-    }, 30_000)
-    return () => window.clearInterval(timer)
-  }, [phase, refreshBackups])
-
-  const backupNow = async () => {
-    setBackupBusy(true)
-    try {
-      await createBackup()
-      await refreshBackups()
-      setBackupMessage('Backup saved in Friday’s data home.')
-    } catch (error) { setBackupMessage(`Backup failed: ${error instanceof Error ? error.message : String(error)}`) }
-    finally { setBackupBusy(false) }
-  }
-
-  const preview = async (id: string) => {
-    setBackupBusy(true)
-    try { setRestorePlan({ id, preview: await previewRestore(id) }); setBackupMessage('') }
-    catch (error) { setRestorePlan(null); setBackupMessage(`Restore preview refused: ${error instanceof Error ? error.message : String(error)}`) }
-    finally { setBackupBusy(false) }
-  }
-
-  const replace = async () => {
-    if (!restorePlan) return
-    setBackupBusy(true)
-    try {
-      const { theme: restored } = await restoreBackup(restorePlan.id, restorePlan.preview.confirmation)
-      themeRef.current = restored
-      setTheme(restored)
-      applyTheme(restored)
-      setRestorePlan(null)
-      await refreshBackups()
-      setBackupMessage('Authored state restored. A pre-restore backup was saved.')
-    } catch (error) { setRestorePlan(null); setBackupMessage(`Restore refused: ${error instanceof Error ? error.message : String(error)}`) }
-    finally { setBackupBusy(false) }
-  }
   const [paletteOpen, setPaletteOpen] = useState(false)
   const [aboutOpen, setAboutOpen] = useState(false)
-  const [searchQuery, setSearchQuery] = useState('')
-  const [searchResults, setSearchResults] = useState<ActionSummary[]>([])
-  const [searchState, setSearchState] = useState<'idle' | 'searching' | 'done' | 'failed'>('idle')
-
-  const themeRef = useRef<ThemePreference>('system')
   const paletteInvoker = useRef<HTMLElement | null>(null)
+  const aboutInvoker = useRef<HTMLElement | null>(null)
+  const restoreInvoker = useRef<HTMLElement | null>(null)
+  const menuInvoker = useRef<HTMLElement | null>(null)
+  const menuRef = useRef<HTMLDialogElement>(null)
+  const restoreRef = useRef<HTMLDialogElement>(null)
+  const headingRef = useRef<HTMLHeadingElement>(null)
 
-  const refreshHealth = useCallback(async () => {
-    setHealth({ state: 'checking' })
-    try {
-      const payload = await getHealth()
-      setHealth({
-        state: 'ok',
-        version: payload.version,
-        checkedAt: new Date().toLocaleTimeString([], {
-          hour: '2-digit',
-          minute: '2-digit',
-        }),
-      })
-    } catch (error) {
-      setHealth({
-        state: 'error',
-        message: error instanceof Error ? error.message : String(error),
-      })
-    }
+  const navigate = useCallback((next: Route) => {
+    history.pushState(null, '', next === 'home' ? '/' : '/settings')
+    setRoute(next)
+    setMenuOpen(false)
+    document.title = `${next === 'home' ? 'Home' : 'Settings'} | Friday`
+    setAnnouncement(`${next === 'home' ? 'Home' : 'Settings'} view`)
+    requestAnimationFrame(() => headingRef.current?.focus())
   }, [])
-
+  useEffect(() => {
+    document.title = `${route === 'home' ? 'Home' : 'Settings'} | Friday`
+    const pop = () => { const next = location.pathname === '/settings' ? 'settings' : 'home'; setRoute(next); document.title = `${next === 'home' ? 'Home' : 'Settings'} | Friday`; requestAnimationFrame(() => headingRef.current?.focus()) }
+    window.addEventListener('popstate', pop)
+    return () => window.removeEventListener('popstate', pop)
+  }, [route])
+  const refreshBackups = useCallback(async () => {
+    try {
+      const state = await listBackups()
+      setBackups(state.backups)
+      setBackupsStale(false)
+      if (state.lastFailure) setBackupMessage(`Backup failed: ${state.lastFailure}`)
+    } catch { setBackupsStale(true); setBackupMessage('Could not check backups. Check the Friday data home and retry.') }
+  }, [])
+  const refreshHealth = useCallback(async () => {
+    try {
+      const response = await getHealth()
+      setHealth({ version: response.version, checkedAt: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) })
+    } catch (error) { setHealth(previous => ({ ...previous, error: error instanceof Error ? error.message : String(error) })) }
+  }, [])
   const chooseTheme = useCallback(async (next: ThemePreference) => {
     const previous = themeRef.current
-    themeRef.current = next
-    setTheme(next)
-    applyTheme(next)
+    themeRef.current = next; setTheme(next); applyTheme(next)
     try {
       const saved = await saveTheme(next)
-      themeRef.current = saved.theme
-      setTheme(saved.theme)
-      applyTheme(saved.theme)
+      themeRef.current = saved.theme; setTheme(saved.theme); applyTheme(saved.theme)
       setAnnouncement(`Appearance saved: ${saved.theme}`)
       return true
     } catch (error) {
-      themeRef.current = previous
-      setTheme(previous)
-      applyTheme(previous)
-      setAnnouncement(
-        `Appearance was not saved: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
-      )
+      themeRef.current = previous; setTheme(previous); applyTheme(previous)
+      setAnnouncement(`Appearance was not saved: ${error instanceof Error ? error.message : String(error)}`)
       return false
     }
   }, [])
-
-  const actionContext: ActionContext = useMemo(
-    () => ({
-      setTheme: chooseTheme,
-      requestAbout: () => setAboutOpen(true),
-    }),
-    [chooseTheme],
-  )
-
-  const runAction = useCallback(
-    async (actionId: string) => {
-      setPaletteOpen(false)
-      const outcome = await registry.invoke(actionId, actionContext)
-      setAnnouncement(outcome.message)
-      if (actionId === 'friday.check-service') void refreshHealth()
-    },
-    [actionContext, refreshHealth, registry],
-  )
-
-  const openPalette = useCallback(() => {
-    paletteInvoker.current = document.activeElement as HTMLElement | null
-    setPaletteOpen(true)
-  }, [])
-
-  const closePalette = useCallback(() => setPaletteOpen(false), [])
-
+  const actionContext: ActionContext = useMemo(() => ({ setTheme: chooseTheme, requestAbout: () => { aboutInvoker.current = paletteOpen ? paletteInvoker.current : document.activeElement as HTMLElement; setAboutOpen(true) } }), [chooseTheme, paletteOpen])
+  const runAction = useCallback(async (id: string) => {
+    setPaletteOpen(false)
+    const outcome = await registry.invoke(id, actionContext)
+    setAnnouncement(outcome.message)
+    if (id === 'friday.check-service') void refreshHealth()
+  }, [registry, actionContext, refreshHealth])
+  const openPalette = useCallback(() => { paletteInvoker.current = document.activeElement as HTMLElement; setPaletteOpen(true) }, [])
+  useEffect(() => { if (!paletteOpen && paletteInvoker.current?.isConnected) paletteInvoker.current.focus() }, [paletteOpen])
+  useEffect(() => { if (!aboutOpen && aboutInvoker.current?.isConnected) aboutInvoker.current.focus() }, [aboutOpen])
+  useEffect(() => {
+    const key = (event: KeyboardEvent) => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k' && !restorePlan && !aboutOpen) { event.preventDefault(); openPalette() }
+    }
+    document.addEventListener('keydown', key)
+    return () => document.removeEventListener('keydown', key)
+  }, [openPalette, restorePlan, aboutOpen])
   useEffect(() => {
     let cancelled = false
     void (async () => {
       try {
         const payload = await getBootstrap()
         if (cancelled) return
-        rememberCsrfToken(payload.csrfToken)
-        setVersion(payload.version)
-        themeRef.current = payload.theme
-        setTheme(payload.theme)
-        applyTheme(payload.theme)
-        setPhase('ready')
-        void refreshBackups().catch(() => setBackupMessage('Could not list backups. Check the Friday data home and retry.'))
-        await refreshHealth()
+        rememberCsrfToken(payload.csrfToken); setVersion(payload.version)
+        themeRef.current = payload.theme; setTheme(payload.theme); applyTheme(payload.theme)
+        setPhase('ready'); void refreshBackups(); void refreshHealth()
       } catch (error) {
         if (cancelled) return
-        setLoadError(
-          error instanceof ApiError
-            ? `${error.message} (status ${error.status})`
-            : error instanceof Error
-              ? error.message
-              : String(error),
-        )
+        setLoadError(error instanceof ApiError ? `${error.message} (status ${error.status})` : error instanceof Error ? error.message : String(error))
         setPhase('failed')
       }
     })()
-    return () => {
-      cancelled = true
-    }
-  }, [refreshHealth, refreshBackups])
-
+    return () => { cancelled = true }
+  }, [refreshBackups, refreshHealth])
+  useEffect(() => watchSystemTheme(() => { if (themeRef.current === 'system') applyTheme('system') }), [])
   useEffect(() => {
-    return watchSystemTheme(() => {
-      if (themeRef.current === 'system') applyTheme('system')
-    })
-  }, [])
-
+    const dialog = menuRef.current
+    if (!dialog) return
+    if (menuOpen && !dialog.open) dialog.showModal()
+    if (!menuOpen && dialog.open) { dialog.close(); if (menuInvoker.current?.isConnected) menuInvoker.current.focus() }
+  }, [menuOpen])
   useEffect(() => {
-    function onKeyDown(event: KeyboardEvent) {
-      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') {
-        event.preventDefault()
-        setPaletteOpen(true)
-      }
-    }
-    document.addEventListener('keydown', onKeyDown)
-    return () => document.removeEventListener('keydown', onKeyDown)
-  }, [])
-
+    const dialog = restoreRef.current
+    if (!dialog) return
+    if (restorePlan && !dialog.open) dialog.showModal()
+    if (!restorePlan && dialog.open) { dialog.close(); if (restoreInvoker.current?.isConnected) restoreInvoker.current.focus() }
+  }, [restorePlan])
   useEffect(() => {
-    if (!paletteOpen) paletteInvoker.current?.focus?.()
-  }, [paletteOpen])
-
-  useEffect(() => {
-    const trimmed = searchQuery.trim()
-    if (trimmed.length === 0) {
-      setSearchResults([])
-      setSearchState('idle')
-      return
-    }
-    let cancelled = false
-    setSearchState('searching')
-    const timer = setTimeout(() => {
-      void searchActions(trimmed)
-        .then((payload) => {
-          if (cancelled) return
-          setSearchResults(payload.results)
-          setSearchState('done')
-        })
-        .catch(() => {
-          if (cancelled) return
-          setSearchResults([])
-          setSearchState('failed')
-        })
-    }, 140)
-    return () => {
-      cancelled = true
-      clearTimeout(timer)
-    }
-  }, [searchQuery])
-
-  const resolved = resolveTheme(theme)
-  const healthLabel =
-    health.state === 'ok'
-      ? `Responded at ${health.checkedAt} · version ${health.version}`
-      : health.state === 'error'
-        ? `Not reachable: ${health.message}`
-        : 'Checking the loopback service…'
-
-  return (
-    <div className="shell">
-      <a className="skip-link" href="#main">
-        Skip to main content
-      </a>
-
-      <aside className="rail">
-        <div className="rail__brand">
-          <span className="rail__mark" aria-hidden="true">
-            F
-          </span>
-          <span className="rail__name">
-            Friday
-            <span className="rail__tagline">local control room</span>
-          </span>
-        </div>
-
-        <nav aria-label="Primary">
-          <ul className="rail__list">
-            <li>
-              <a
-                className="rail__item rail__item--current"
-                href="#main"
-                aria-current="page"
-              >
-                <HomeIcon />
-                <span className="rail__label">Home</span>
-              </a>
-            </li>
-          </ul>
-
-          <p className="rail__group-label" id="rail-planned">
-            Later slices
-          </p>
-          <ul className="rail__list" aria-labelledby="rail-planned">
-            {PLANNED_DESTINATIONS.map((destination) => (
-              <li key={destination}>
-                <span
-                  className="rail__item rail__item--planned"
-                  aria-disabled="true"
-                >
-                  <span className="rail__dot" aria-hidden="true" />
-                  <span className="rail__label">{destination}</span>
-                  <span className="rail__badge">planned</span>
-                </span>
-              </li>
-            ))}
-          </ul>
-        </nav>
-
-        <div className="rail__foot">
-          <button
-            type="button"
-            className="rail__item rail__item--button"
-            title="About Friday"
-            onClick={() => void runAction('friday.about')}
-          >
-            <InfoIcon />
-            <span className="rail__label">About Friday</span>
-          </button>
-          <p className="rail__version">v{version} · loopback only</p>
-        </div>
-      </aside>
-
-      <div className="column">
-        <header className="topbar">
-          <p className="topbar__context">
-            <span className="topbar__pulse" aria-hidden="true" />
-            Local shell
-          </p>
-          <div className="topbar__tools">
-            <button
-              type="button"
-              className="palette-trigger"
-              onClick={openPalette}
-              aria-keyshortcuts="Control+K Meta+K"
-              aria-haspopup="dialog"
-            >
-              <SearchIcon />
-              <span>Search</span>
-              <kbd className="kbd">Ctrl K</kbd>
-            </button>
-
-            <div className="theme" role="group" aria-label="Appearance">
-              {THEME_OPTIONS.map((option) => {
-                const Icon = THEME_ICONS[option.value]
-                const selected = theme === option.value
-                return (
-                  <button
-                    key={option.value}
-                    type="button"
-                    className="theme__option"
-                    aria-pressed={selected}
-                    disabled={phase !== 'ready'}
-                    title={option.description}
-                    onClick={() => void chooseTheme(option.value)}
-                  >
-                    <Icon size={18} />
-                    <span>{option.label}</span>
-                  </button>
-                )
-              })}
-            </div>
-          </div>
-        </header>
-
-        <main id="main" tabIndex={-1} aria-busy={phase === 'loading'}>
-          {phase === 'failed' ? (
-            <section className="panel panel--error" role="alert">
-              <h1 className="headline">Friday could not start</h1>
-              <p className="body">
-                The local service did not answer with a session. Nothing was
-                changed. Check that the server is still running on this machine.
-              </p>
-              <p className="mono">{loadError}</p>
-              <button
-                type="button"
-                className="button button--primary"
-                onClick={() => window.location.reload()}
-              >
-                Try again
-              </button>
-            </section>
-          ) : (
-            <>
-              <section className="hero" aria-labelledby="hero-title">
-                <div className="hero__text">
-                  <p className="eyebrow">Slice 01 · local shell</p>
-                  <h1 id="hero-title" className="display">
-                    Your laptop,
-                    <br />
-                    quietly observed.
-                  </h1>
-                  <p className="hero__lede">
-                    Friday keeps its own state outside your projects. This build
-                    proves the foundation: a loopback-only service, one database
-                    owner, and a preference that survives a restart.
-                  </p>
-                  <div className="hero__actions">
-                    <button
-                      type="button"
-                      className="button button--primary"
-                      onClick={() => void runAction('friday.check-service')}
-                      disabled={phase !== 'ready'}
-                    >
-                      <ServiceIcon />
-                      Check local service
-                    </button>
-                    <button
-                      type="button"
-                      className="button button--tonal"
-                      onClick={openPalette}
-                      disabled={phase !== 'ready'}
-                    >
-                      <PaletteIcon />
-                      Open command palette
-                      <kbd className="kbd">Ctrl K</kbd>
-                    </button>
-                  </div>
-                  <p className="hero__footnote">
-                    Nothing here scans a folder, reads a credential, opens a
-                    program, or runs a work command.
-                  </p>
-                </div>
-                <div className="hero__motif" aria-hidden="true">
-                  <span className="hero__ring hero__ring--outer" />
-                  <span className="hero__ring hero__ring--mid" />
-                  <span className="hero__ring hero__ring--inner" />
-                </div>
-              </section>
-
-              <section className="ledger" aria-labelledby="ledger-title">
-                <div className="section-head">
-                  <h2 id="ledger-title" className="title-large">
-                    Runtime
-                  </h2>
-                  <p className="section-head__note">
-                    Observed from this process, not a promise about project data.
-                  </p>
-                </div>
-                <dl className="ledger__list">
-                  <div className="ledger__row">
-                    <dt>
-                      <ServiceIcon />
-                      Service
-                    </dt>
-                    <dd>
-                      <span className="ledger__value">
-                        127.0.0.1 · loopback only
-                      </span>
-                      <span className="ledger__meta">{healthLabel}</span>
-                    </dd>
-                    <dd className="ledger__control">
-                      <button
-                        type="button"
-                        className="button button--quiet"
-                        onClick={() => void runAction('friday.check-service')}
-                      >
-                        Re-check
-                      </button>
-                    </dd>
-                  </div>
-
-                  <div className="ledger__row">
-                    <dt>
-                      <DatabaseIcon />
-                      Store
-                    </dt>
-                    <dd>
-                      <span className="ledger__value">
-                        SQLite with FTS5, owned by one worker thread
-                      </span>
-                      <span className="ledger__meta">
-                        Prefix search runs in the owner, so HTTP stays responsive.
-                      </span>
-                    </dd>
-                    <dd className="ledger__control">
-                      <span className="badge badge--calm">Owned</span>
-                    </dd>
-                  </div>
-
-                  <div className="ledger__row">
-                    <dt>
-                      <LockIcon />
-                      Instance
-                    </dt>
-                    <dd>
-                      <span className="ledger__value">
-                        One Friday per data home
-                      </span>
-                      <span className="ledger__meta">
-                        A second instance is refused before the database opens.
-                      </span>
-                    </dd>
-                    <dd className="ledger__control">
-                      <span className="badge badge--calm">Guarded</span>
-                    </dd>
-                  </div>
-
-                  <div className="ledger__row">
-                    <dt>
-                      <SunIcon />
-                      Appearance
-                    </dt>
-                    <dd>
-                      <span className="ledger__value">
-                        {theme === 'system'
-                          ? `System · currently ${resolved}`
-                          : `${theme === 'light' ? 'Light' : 'Dark'} palette`}
-                      </span>
-                      <span className="ledger__meta">
-                        Saved through the public API and restored at startup.
-                      </span>
-                    </dd>
-                    <dd className="ledger__control">
-                      <span className="badge">{theme}</span>
-                    </dd>
-                  </div>
-
-                  <div className="ledger__row">
-                    <dt>
-                      <InfoIcon />
-                      Sources
-                    </dt>
-                    <dd>
-                      <span className="ledger__value">None configured</span>
-                      <span className="ledger__meta">
-                        No scan root, network integration, credential, or work
-                        command is enabled in this slice.
-                      </span>
-                    </dd>
-                    <dd className="ledger__control">
-                      <span className="badge badge--muted">Empty by design</span>
-                    </dd>
-                  </div>
-                </dl>
-              </section>
-
-              <section className="actions" aria-labelledby="actions-title">
-                <div className="section-head">
-                  <h2 id="actions-title" className="title-large">
-                    Registered actions
-                  </h2>
-                  <p className="section-head__note">
-                    The same registry feeds this list, the palette, and the
-                    visible buttons.
-                  </p>
-                </div>
-
-                <div className="search">
-                  <label className="search__label" htmlFor="action-search">
-                    Search the local action index
-                  </label>
-                  <div className="search__field">
-                    <SearchIcon />
-                    <input
-                      id="action-search"
-                      type="search"
-                      placeholder="Try “serv”, “about”, or a prefix"
-                      autoComplete="off"
-                      value={searchQuery}
-                      onChange={(event) => setSearchQuery(event.target.value)}
-                    />
-                  </div>
-                  <p className="search__status" role="status">
-                    {searchQuery.trim().length === 0
-                      ? `${actions.length} registered actions in the local FTS5 index`
-                      : searchState === 'searching'
-                        ? 'Searching the local index…'
-                        : searchState === 'failed'
-                          ? 'The local index did not answer.'
-                          : `${searchResults.length} ${searchResults.length === 1 ? 'match' : 'matches'} for “${searchQuery.trim()}”`}
-                  </p>
-
-                  {searchQuery.trim().length > 0 && searchResults.length > 0 ? (
-                    <ul className="search__results">
-                      {searchResults.map((result) => (
-                        <li key={result.id}>
-                          <button
-                            type="button"
-                            className="search__result"
-                            onClick={() => void runAction(result.id)}
-                          >
-                            <span className="search__result-label">
-                              {result.label}
-                            </span>
-                            <span className="search__result-description">
-                              {result.description}
-                            </span>
-                          </button>
-                        </li>
-                      ))}
-                    </ul>
-                  ) : null}
-                </div>
-              </section>
-              <section className="actions" aria-labelledby="backup-title">
-                <div className="section-head">
-                  <h2 id="backup-title" className="title-large">Authored-state backups</h2>
-                  <p className="section-head__note">Preferences and identities only; currently appearance is the only authored value. Same-disk copies do not protect against device loss.</p>
-                </div>
-                <button type="button" className="button button--primary" disabled={phase !== 'ready' || backupBusy} onClick={() => void backupNow()}>Back up now</button>
-                <p role="status">{backupMessage || 'Daily copies are saved while Friday is active and after missed days.'}</p>
-                <ul>
-                  {backups.map((backup) => <li key={backup.id}>
-                    {backup.kind} · {backup.createdAt} · {backup.counts.preferences} preference(s){' '}
-                    <button type="button" className="button button--quiet" disabled={backupBusy} onClick={() => void preview(backup.id)}>Preview restore</button>
-                  </li>)}
-                </ul>
-                {restorePlan && <div role="group" aria-label="Restore confirmation">
-                  <p>Replace {restorePlan.preview.currentTheme} with {restorePlan.preview.restoredTheme}? This replaces authored preferences, not the rebuildable action index. A pre-restore copy is required.</p>
-                  <button type="button" className="button button--primary" disabled={backupBusy} onClick={() => void replace()}>Replace authored state</button>
-                  <button type="button" className="button button--quiet" onClick={() => setRestorePlan(null)}>Cancel restore</button>
-                </div>}
-              </section>
-            </>
-          )}
-        </main>
-
-        <footer className="footer">
-          <p>
-            Friday v{version} · Your state stays in Friday's own data home.
-          </p>
-          <button
-            type="button"
-            className="footer__link"
-            onClick={() => void runAction('friday.about')}
-          >
-            About &amp; licences
-          </button>
-        </footer>
-      </div>
-
-      <p className="sr-only" role="status" aria-live="polite">
-        {announcement}
-      </p>
-
-      <CommandPalette
-        open={paletteOpen}
-        actions={actions}
-        onClose={closePalette}
-        onInvoke={(actionId) => void runAction(actionId)}
-      />
-
-      <AboutDialog
-        open={aboutOpen}
-        version={version}
-        onClose={() => setAboutOpen(false)}
-      />
-    </div>
-  )
+    if (phase !== 'ready') return
+    const timer = window.setInterval(() => { void refreshBackups() }, 30_000)
+    return () => window.clearInterval(timer)
+  }, [phase, refreshBackups])
+  const backupNow = async () => {
+    setBackupBusy(true)
+    try { await createBackup(); await refreshBackups(); setBackupMessage('Backup saved in Friday’s data home.') }
+    catch (error) { setBackupMessage(`Backup failed: ${error instanceof Error ? error.message : String(error)}`) }
+    finally { setBackupBusy(false) }
+  }
+  const preview = async (id: string) => {
+    restoreInvoker.current = document.activeElement as HTMLElement
+    setBackupBusy(true); setRestoreError('')
+    try { setRestorePlan({ id, preview: await previewRestore(id) }) }
+    catch (error) { setBackupMessage(`Restore preview refused: ${error instanceof Error ? error.message : String(error)}`) }
+    finally { setBackupBusy(false) }
+  }
+  const replace = async () => {
+    if (!restorePlan) return
+    setBackupBusy(true); setRestoreError('')
+    try {
+      const { theme: restored } = await restoreBackup(restorePlan.id, restorePlan.preview.confirmation)
+      themeRef.current = restored; setTheme(restored); applyTheme(restored)
+      setRestorePlan(null); await refreshBackups()
+      setBackupMessage('Authored state restored. A pre-restore backup was saved.')
+    } catch (error) { setRestoreError(`Restore refused: ${error instanceof Error ? error.message : String(error)}. Check the Friday data home and retry or cancel.`) }
+    finally { setBackupBusy(false) }
+  }
+  const nav = (where: Route) => <a href={where === 'home' ? '/' : '/settings'} className="rail__item" aria-current={route === where ? 'page' : undefined} title={where === 'home' ? 'Home' : 'Settings'} onClick={event => { event.preventDefault(); navigate(where) }}>{where === 'home' ? <HomeIcon /> : <PaletteIcon />}<span className="rail__label">{where === 'home' ? 'Home' : 'Settings'}</span></a>
+  return <div className="shell">
+    <a className="skip-link" href="#main">Skip to main content</a>
+    <aside className="rail">
+      <div className="rail__brand"><span className="rail__mark" aria-hidden="true">F</span><span className="rail__name">Friday<span className="rail__tagline">local control room</span></span></div>
+      <nav aria-label="Primary"><ul className="rail__list"><li>{nav('home')}</li><li>{nav('settings')}</li></ul></nav>
+      <div className="rail__foot"><button type="button" className="rail__item rail__item--button" title="About Friday" onClick={() => void runAction('friday.about')}><InfoIcon /><span className="rail__label">About Friday</span></button></div>
+    </aside>
+    <div className="column"><header className="topbar"><button type="button" className="menu-button button button--tonal" aria-haspopup="dialog" onClick={() => { menuInvoker.current = document.activeElement as HTMLElement; setMenuOpen(true) }}>Menu</button><span className="topbar__context">Friday</span><button type="button" className="palette-trigger" onClick={openPalette} aria-keyshortcuts="Control+K Meta+K" aria-haspopup="dialog"><SearchIcon /><span>Search commands</span><kbd className="kbd">Ctrl K</kbd></button></header>
+      <main id="main" tabIndex={-1} aria-busy={phase === 'loading'}>
+        {phase === 'failed' ? <section className="panel panel--error" role="alert"><h1 className="headline" ref={headingRef} tabIndex={-1}>Friday could not connect to its local service</h1><p>Nothing was changed. Check that the server is running on this machine.</p><p>{loadError}</p><button type="button" className="button button--primary" onClick={() => location.reload()}>Try again</button></section> : route === 'home' ? <>
+          <h1 className="headline route-title" ref={headingRef} tabIndex={-1}>Home</h1>
+          {backupMessage.startsWith('Backup failed') && <section className="attention" aria-label="Attention"><h2>Backup needs attention</h2><p>{backupMessage}</p><button type="button" className="button button--quiet" onClick={() => navigate('settings')}>Open recovery settings</button></section>}
+          <section className="return-surface" aria-labelledby="return-title"><div className="return-surface__body"><h2 id="return-title" className="display">Nothing to resume yet</h2><p>No project source is connected to this build. Friday can check its local service and keep your appearance and recovery preferences; source setup is not available yet.</p><div className="hero__actions"><button type="button" className="button button--primary" onClick={() => navigate('settings')}>View settings</button><button type="button" className="button button--tonal" onClick={openPalette}>Search commands</button></div></div><div className="return-surface__seam"><ServiceIcon /><span>{health.error ? 'Service check failed' : health.checkedAt ? `Service responded at ${health.checkedAt}` : 'Checking local service…'}</span></div></section>
+          <section className="home-capabilities" aria-labelledby="capabilities"><h2 id="capabilities" className="title-large">What Friday can do now</h2><p>Check the local service, find registered commands, save appearance, and back up or restore authored preferences.</p><button type="button" className="button button--quiet" onClick={() => navigate('settings')}>Manage appearance and recovery</button></section>
+        </> : <>
+          <h1 className="headline route-title" ref={headingRef} tabIndex={-1}>Settings</h1>
+          <section className="settings-section" aria-labelledby="appearance"><h2 id="appearance" className="title-large">Appearance</h2><p>{theme === 'system' ? `Following system (${resolveTheme(theme)})` : `${theme === 'light' ? 'Light' : 'Dark'} palette`} is selected. Saved in Friday’s data home.</p><div className="theme" role="group" aria-label="Appearance">{THEME_OPTIONS.map(option => { const Icon = THEME_ICONS[option.value]; return <button key={option.value} type="button" className="theme__option" aria-pressed={theme === option.value} disabled={phase !== 'ready'} title={option.description} onClick={() => void chooseTheme(option.value)}><Icon size={18}/><span>{option.label}</span></button> })}</div></section>
+          <section className="settings-section" aria-labelledby="sources"><h2 id="sources" className="title-large">Sources</h2><p>Source setup is not available in this build. Friday does not scan project folders here.</p></section>
+          <section className="settings-section" aria-labelledby="service"><h2 id="service" className="title-large">Local service</h2><p role="status">{health.error ? `Check failed: ${health.error}${health.checkedAt ? `. Last responded at ${health.checkedAt}.` : ''}` : health.checkedAt ? `Responded at ${health.checkedAt}, version ${health.version}.` : 'Checking the local service…'}</p><button type="button" className="button button--quiet" onClick={() => void runAction('friday.check-service')}>Check local service</button></section>
+          <section className="settings-section" aria-labelledby="recovery"><h2 id="recovery" className="title-large">Recovery</h2><p>Copies include authored preferences, currently appearance. Same-disk copies do not protect against device loss.</p><button type="button" className="button button--primary" disabled={backupBusy} onClick={() => void backupNow()}>Back up now</button><p role="status" className={backupMessage.includes('failed') || backupsStale ? 'error-text' : ''}>{backupMessage || (backups.length ? 'Latest known copies below.' : 'No backup yet.')}{backupsStale ? ' Showing last known copies.' : ''}</p>{backupsStale && <button type="button" className="button button--quiet" onClick={() => void refreshBackups()}>Retry backup list</button>}<ul className="backup-list">{backups.map(backup => <li key={backup.id}><span>{backup.kind} backup, {new Date(backup.createdAt).toLocaleString()} — {backup.counts.preferences} preference(s)</span><button type="button" className="button button--quiet" disabled={backupBusy} onClick={() => void preview(backup.id)}>Preview restore</button></li>)}</ul></section>
+        </>}
+      </main><footer className="footer"><p>Friday v{version} · Your state stays in Friday's own data home.</p><button type="button" className="footer__link" onClick={() => void runAction('friday.about')}>About &amp; licences</button></footer></div>
+    <p className="sr-only" role="status" aria-live="polite">{announcement}</p>
+    <dialog ref={menuRef} className="nav-dialog" aria-label="Friday navigation" onCancel={event => { event.preventDefault(); setMenuOpen(false) }}><div className="nav-dialog__head"><strong>Friday</strong><button type="button" className="button button--quiet" onClick={() => setMenuOpen(false)}>Close menu</button></div><nav aria-label="Mobile primary"><ul><li>{nav('home')}</li><li>{nav('settings')}</li></ul></nav></dialog>
+    <dialog ref={restoreRef} className="about restore-dialog" aria-labelledby="restore-title" onCancel={event => { event.preventDefault(); if (!backupBusy) setRestorePlan(null) }}>{restorePlan && <><h2 id="restore-title" className="title-large">Confirm restore</h2><p>Backup from {new Date(restorePlan.preview.createdAt).toLocaleString()}. Replace {restorePlan.preview.currentTheme} with {restorePlan.preview.restoredTheme}?</p><p>Included: {restorePlan.preview.counts.preferences} authored preference(s). Excluded: {restorePlan.preview.excluded.join(', ') || 'none'}. A pre-restore copy of current state is required before replacement.</p>{restoreError && <p role="alert" className="error-text">{restoreError}</p>}<div className="dialog-actions"><button type="button" className="button button--quiet" disabled={backupBusy} onClick={() => setRestorePlan(null)}>Cancel restore</button><button type="button" className="button button--primary" disabled={backupBusy} onClick={() => void replace()}>{restoreError ? 'Retry restore' : 'Replace authored state'}</button></div></>}</dialog>
+    <CommandPalette open={paletteOpen} actions={actions} onClose={() => setPaletteOpen(false)} onInvoke={id => void runAction(id)} />
+    <AboutDialog open={aboutOpen} version={version} onClose={() => setAboutOpen(false)} />
+  </div>
 }
 
 function AboutDialog({
@@ -709,6 +210,7 @@ function AboutDialog({
       aria-labelledby="about-title"
       onCancel={(event) => {
         event.preventDefault()
+        ref.current?.close()
         onClose()
       }}
       onClose={onClose}
@@ -741,7 +243,7 @@ function AboutDialog({
           </dd>
         </div>
       </dl>
-      <button type="button" className="button button--primary" onClick={onClose}>
+      <button type="button" className="button button--primary" onClick={() => { ref.current?.close(); onClose() }}>
         Close
       </button>
     </dialog>

@@ -155,6 +155,20 @@ test('narrow navigation has full labels and preserves the selected route and foc
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true)
 })
 
+test('bootstrap failure offers a retry without claiming project state', async (t) => {
+  const browser = requireBrowser(t)
+  if (!browser) return
+  const host = await startHarness()
+  t.after(() => host.stop())
+  const page = await browser.browser.newPage()
+  t.after(() => page.close())
+  await page.route('**/api/bootstrap', route => route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: 'Service unavailable' }) }))
+  await page.goto(host.url)
+  await page.getByRole('heading', { name: 'Friday could not connect to its local service' }).waitFor()
+  assert.equal(await page.getByRole('button', { name: 'Try again' }).isVisible(), true)
+  assert.equal(await page.getByText('Nothing to resume yet').count(), 0)
+})
+
 test('Home and recovery actions reflow without page-wide scrolling at laptop and zoomed widths', async (t) => {
   const browser = requireBrowser(t)
   if (!browser) return

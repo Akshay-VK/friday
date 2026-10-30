@@ -26,10 +26,10 @@ export function Sources({ ready, refreshKey }: { ready: boolean; refreshKey: num
     setMessage('Preview cancelled. No permission was saved.')
   })
   return <section className="actions" aria-labelledby="sources-title">
-    <div className="section-head"><h2 id="sources-title" className="title-large">Scan roots</h2><p className="section-head__note">Local reads only. Network access and Open / Run execution require separate permission; preview never follows URLs or runs commands.</p></div>
+    <div className="section-head"><h2 id="sources-title" className="title-large">Scan roots</h2><p className="section-head__note">Windows support: ordinary local folders via manual path entry. Cloud, WSL and network-share scan roots are not supported. Preview is metadata-only; no project collection runs yet. Browse is unverified; use manual entry. Network access and Open / Run execution require separate permission.</p></div>
     <p role="status">{message}</p>
     <ul>{sources.map((source) => <li key={source.id}>
-      <code>{source.path}</code> · {source.host} · {source.enabled ? 'Local reads permitted' : 'Disabled; no reads'} · {source.health}
+      <code>{source.path}</code> · {source.host} · {source.enabled ? 'Local reads permitted' : 'Disabled; no reads'} · {source.health === 'ready' ? 'present (identity not rechecked)' : source.health}
       {source.exclusions.length > 0 && <span> · excludes {source.exclusions.join(', ')}</span>}{' '}
       <button type="button" className="button button--quiet" disabled={!ready || !source.enabled} onClick={() => void run(async () => { await disableSource(source); pendingPreview.current = null; setPreview(null); await refresh(); setMessage('Scan root disabled. To use it again, preview and approve a new scope.') })}>Disable</button>{' '}
       <button type="button" className="button button--quiet" disabled={!ready} onClick={() => void run(async () => { await revokeSource(source); pendingPreview.current = null; setPreview(null); await refresh(); setMessage('Scan root revoked.') })}>Revoke</button>

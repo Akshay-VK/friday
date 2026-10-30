@@ -1,6 +1,6 @@
-# Friday · foundation shell and authored-state recovery (issues #2–3)
+# Friday · local shell, recovery and bounded scan-root grants (issues #2–4)
 
-This slice starts a Windows-hosted, loopback-only local browser shell. It has no scan roots, credentials, external integrations, Open/Run commands, or startup work commands.
+This slice starts a Windows-hosted, loopback-only local browser shell. It has explicit scan-root grants but no project collectors, credentials, external integrations, Open/Run commands, or startup work commands.
 
 ## Run
 
@@ -14,7 +14,18 @@ npm run build
 npm start
 ```
 
-Open the `FRIDAY_READY` URL. The server binds `127.0.0.1` only; Ctrl+C shuts it down. `npm run dev` builds then starts the same production host, not a network-facing Vite dev server. By default the data home is `%APPDATA%\Friday` on Windows. Set `FRIDAY_DATA_HOME` to an **absolute Friday-owned location** for an isolated trial and `FRIDAY_PORT=0` to select an ephemeral port. Avoid selecting an observed/source project directory. A second instance on the same home refuses to start. This slice does not implement a source picker, automatic browser open, startup registration or an installer.
+Open the `FRIDAY_READY` URL. The server binds `127.0.0.1` only; Ctrl+C shuts it down. `npm run dev` builds then starts the same production host, not a network-facing Vite dev server. By default the data home is `%APPDATA%\Friday` on Windows. Set `FRIDAY_DATA_HOME` to an **absolute Friday-owned location** for an isolated trial and `FRIDAY_PORT=0` to select an ephemeral port. Avoid selecting an observed/source project directory. A second instance on the same home refuses to start. This slice has an unverified native folder-picker bridge with a manual-entry fallback, but no automatic browser open, startup registration or installer.
+
+## Scan-root support (#4 revised scope)
+
+| Host/path | Status |
+| --- | --- |
+| Ordinary physical Windows local-drive folder, manually entered, distinct from Friday's data home | Supported for bounded one-level metadata preview and exact grant after explicit approval; no subsequent project collection yet. Build the reviewed Windows helper with `npm run build:native:windows` using an existing compiler before trying preview; missing helper refuses preview. |
+| Windows folder picker | Implemented, **not interactively verified**; manual entry works independently. Selection alone never grants access. |
+| Cloud-provider/placeholder, UNC/network share, WSL path, junction/reparse root or ancestor, aliases/ambiguous paths | Unsupported; refuse rather than follow or guess. No provider folder or private root is authorized for testing by this documentation. |
+| Linux development fixture | Test-only local preview; not evidence of a Windows cloud or WSL boundary. |
+
+The owner-approved #4 subset does **not** waive source purity or claim full T01/T02/VG-02/VG-03. Linux fixture write-attempt tracing and native Windows local-root fixture/negative tests passed; genuine provider nonhydration, real picker selection/cancel and exhaustive native Windows attempted-write tracing are **unverified**, tracked in #57 and blocking final hardened #55, not this ordinary-local-root #4 subset. A stored grant's `ready` health means the folder exists, **not** that its file identity was rechecked. Future collectors must revalidate identity, host, containment and no-follow rules before any read; an enabled grant is not blanket trust. No scan writes to observed projects, cloud access, Open or Run are authorized by granting a root.
 
 ## Verify
 

@@ -737,8 +737,7 @@ function AboutDialog({
           <dt>Not in this build</dt>
           <dd>
             Project inventory, credential integrations, network integrations,
-            OpenCode service, Telegram, and Run execution. Windows folder
-            previews remain blocked until native safety verification is complete.
+            OpenCode service, Telegram, and Run execution. Cloud, WSL and network-share scan roots are not supported. Real picker interaction, cloud-placeholder nonhydration and native Windows attempted-write tracing remain unverified (#57).
           </dd>
         </div>
       </dl>

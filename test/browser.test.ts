@@ -59,12 +59,18 @@ test('the shell renders with landmarks, a local font, and no remote requests', a
     /default-src 'self'/,
   )
 
-  assert.equal(await page.title(), 'Friday')
+  assert.equal(await page.title(), 'Home | Friday')
   await page.locator('h1').first().waitFor({ state: 'visible' })
-  assert.match((await page.locator('h1').first().textContent()) ?? '', /Your laptop/)
+  assert.match((await page.locator('h1').first().textContent()) ?? '', /Home/)
   assert.equal(await page.locator('main#main').count(), 1)
   assert.equal(await page.locator('nav[aria-label="Primary"]').count(), 1)
   assert.equal(await page.locator('a.skip-link').count(), 1)
+  assert.equal(await page.getByRole('link', { name: 'Home' }).getAttribute('aria-current'), 'page')
+  await page.getByRole('link', { name: 'Settings' }).click()
+  assert.equal(await page.getByRole('heading', { name: 'Settings', level: 1 }).count(), 1)
+  assert.equal(await page.getByRole('link', { name: 'Settings' }).getAttribute('aria-current'), 'page')
+  assert.equal(await page.title(), 'Settings | Friday')
+  assert.equal(await page.getByRole('link', { name: 'Projects' }).count(), 0)
 
   const remote = requests.filter(
     (url) => !url.startsWith(harness.url) && !url.startsWith('data:'),
@@ -84,6 +90,175 @@ test('the shell renders with landmarks, a local font, and no remote requests', a
   )
 })
 
+test('backup controls restore appearance through explicit preview and confirmation', async (t) => {
+  const browser = requireBrowser(t)
+  if (!browser) return
+  const host = await startHarness()
+  t.after(() => host.stop())
+  const page = await openShell(browser, host)
+  t.after(() => page.close())
+  await page.getByRole('link', { name: 'Settings' }).click()
+  await page.getByRole('button', { name: 'Dark', exact: true }).click()
+  await page.getByRole('button', { name: 'Back up now' }).click()
+  await page.getByText('Backup saved', { exact: false }).waitFor()
+  await page.getByRole('button', { name: 'System', exact: true }).click()
+  await page.locator('li').filter({ hasText: 'manual' }).getByRole('button', { name: 'Preview restore' }).click()
+  await page.getByRole('dialog', { name: 'Confirm restore' }).getByText('Replace system with dark', { exact: false }).waitFor()
+  await page.getByRole('button', { name: 'Replace authored state' }).click()
+  await page.locator('button[aria-pressed="true"]').filter({ hasText: 'Dark' }).waitFor()
+  assert.equal(await page.getByRole('button', { name: 'Dark', exact: true }).getAttribute('aria-pressed'), 'true')
+})
+
+test('backup list retry clears obsolete errors and returns refreshed copies', async (t) => {
+  const browser = requireBrowser(t)
+  if (!browser) return
+  const host = await startHarness()
+  t.after(() => host.stop())
+  const page = await browser.browser.newPage()
+  t.after(() => page.close())
+  await page.route('**/api/backups', async route => {
+    const response = await route.fetch()
+    await route.fulfill({ response, json: { ...await response.json(), lastFailure: 'Previous copy failed' } })
+  })
+  await page.goto(host.url)
+  await page.getByRole('heading', { name: 'Backup needs attention' }).waitFor()
+  await page.getByRole('link', { name: 'Settings' }).click()
+  await page.getByRole('status').getByText('Backup failed: Previous copy failed').waitFor()
+  await page.unrouteAll()
+  await page.route('**/api/backups', route => route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: 'Inventory unavailable' }) }))
+  const retry = page.getByRole('button', { name: 'Retry backup list' })
+  await page.getByRole('button', { name: 'Back up now' }).click()
+  await retry.waitFor()
+  await page.getByRole('status').getByText('Could not check backups', { exact: false }).waitFor()
+  await page.getByRole('link', { name: 'Home' }).click()
+  assert.equal(await page.getByRole('heading', { name: 'Backup needs attention' }).count(), 1)
+  await page.getByRole('link', { name: 'Settings' }).click()
+  await page.unroute('**/api/backups')
+  await retry.click()
+  await retry.waitFor({ state: 'hidden' })
+  assert.equal(await page.getByRole('status').getByText('Could not check backups', { exact: false }).count(), 0)
+  assert.equal(await page.getByRole('status').getByText('Backup failed: Previous copy failed').count(), 0)
+  await page.getByRole('link', { name: 'Home' }).click()
+  assert.equal(await page.getByRole('heading', { name: 'Backup needs attention' }).count(), 0)
+  await page.getByRole('link', { name: 'Settings' }).click()
+  assert.equal(await page.locator('li').filter({ hasText: 'manual backup' }).count(), 1)
+})
+
+test('a completed backup remains saved when listing fails, with last known copies and list-only retry', async (t) => {
+  const browser = requireBrowser(t)
+  if (!browser) return
+  const host = await startHarness()
+  t.after(() => host.stop())
+  const page = await openShell(browser, host)
+  t.after(() => page.close())
+  await page.getByRole('link', { name: 'Settings' }).click()
+  await page.getByRole('button', { name: 'Back up now' }).click()
+  await page.getByRole('status').getByText('Backup saved', { exact: false }).waitFor()
+  let creates = 0
+  await page.route('**/api/backups/create', async route => { creates++; await route.continue() })
+  await page.route('**/api/backups', route => route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: 'Inventory unavailable' }) }))
+  await page.getByRole('button', { name: 'Back up now' }).click()
+  const retry = page.getByRole('button', { name: 'Retry backup list' })
+  await retry.waitFor()
+  await page.getByRole('status').getByText('Backup saved', { exact: false }).waitFor()
+  await page.getByRole('status').getByText('Could not check backups', { exact: false }).waitFor()
+  await page.getByRole('button', { name: 'Back up now' }).click({ trial: true })
+  assert.equal(await page.getByRole('status').getByText('Could not check backups', { exact: false }).count(), 1)
+  assert.equal(await page.getByRole('status').getByText('Backup failed', { exact: false }).count(), 0)
+  assert.equal(await page.locator('li').filter({ hasText: 'manual backup' }).count(), 1)
+  await page.unroute('**/api/backups')
+  await retry.click()
+  await retry.waitFor({ state: 'hidden' })
+  assert.equal(await page.getByRole('status').getByText('Could not check backups', { exact: false }).count(), 0)
+  assert.equal(await page.getByRole('status').getByText('Backup saved', { exact: false }).count(), 1)
+  assert.equal(creates, 1, 'list retry must never repeat the backup POST')
+  assert.equal(await page.locator('li').filter({ hasText: 'manual backup' }).count(), 2)
+})
+
+test('restore rejection keeps the current preference and the named dialog open for retry', async (t) => {
+  const browser = requireBrowser(t)
+  if (!browser) return
+  const host = await startHarness()
+  t.after(() => host.stop())
+  const page = await openShell(browser, host)
+  t.after(() => page.close())
+  await page.getByRole('link', { name: 'Settings' }).click()
+  await page.getByRole('button', { name: 'Dark', exact: true }).click()
+  await page.getByRole('button', { name: 'Back up now' }).click()
+  await page.getByText('Backup saved', { exact: false }).waitFor()
+  await page.getByRole('button', { name: 'System', exact: true }).click()
+  await page.locator('li').filter({ hasText: 'manual' }).getByRole('button', { name: 'Preview restore' }).click()
+  const dialog = page.getByRole('dialog', { name: 'Confirm restore' })
+  await dialog.waitFor()
+  await page.route('**/api/backups/restore', route => route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: 'Pre-restore copy failed' }) }))
+  await dialog.getByRole('button', { name: 'Replace authored state' }).click()
+  await dialog.getByRole('alert').getByText('Pre-restore copy failed', { exact: false }).waitFor()
+  assert.equal(await dialog.isVisible(), true)
+  assert.equal(await page.getByRole('button', { name: 'System', exact: true }).getAttribute('aria-pressed'), 'true')
+  await page.keyboard.press('Escape')
+  await dialog.waitFor({ state: 'hidden' })
+  assert.equal(await page.locator('li').filter({ hasText: 'manual' }).getByRole('button', { name: 'Preview restore' }).evaluate(el => el === document.activeElement), true)
+})
+
+test('narrow navigation has full labels and preserves the selected route and focus', async (t) => {
+  const browser = requireBrowser(t)
+  if (!browser) return
+  const host = await startHarness()
+  t.after(() => host.stop())
+  const page = await browser.browser.newPage({ viewport: { width: 390, height: 844 } })
+  t.after(() => page.close())
+  await page.goto(host.url)
+  await page.locator('main[aria-busy="false"]').waitFor()
+  await page.getByRole('button', { name: 'Menu' }).click()
+  const nav = page.getByRole('dialog', { name: 'Friday navigation' })
+  await nav.getByRole('link', { name: 'Settings' }).click()
+  assert.equal(await page.getByRole('heading', { name: 'Settings', level: 1 }).evaluate(el => el === document.activeElement), true)
+  await page.getByRole('button', { name: 'Menu' }).click()
+  assert.equal(await nav.getByRole('link', { name: 'Settings' }).getAttribute('aria-current'), 'page')
+  await page.keyboard.press('Escape')
+  await nav.waitFor({ state: 'hidden' })
+  assert.equal(await page.getByRole('button', { name: 'Menu' }).evaluate(el => el === document.activeElement), true)
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true)
+})
+
+test('bootstrap failure offers a retry without claiming project state', async (t) => {
+  const browser = requireBrowser(t)
+  if (!browser) return
+  const host = await startHarness()
+  t.after(() => host.stop())
+  const page = await browser.browser.newPage()
+  t.after(() => page.close())
+  await page.route('**/api/bootstrap', route => route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: 'Service unavailable' }) }))
+  await page.goto(host.url)
+  await page.getByRole('heading', { name: 'Friday could not connect to its local service' }).waitFor()
+  assert.equal(await page.getByRole('button', { name: 'Try again' }).isVisible(), true)
+  assert.equal(await page.getByText('Nothing to resume yet').count(), 0)
+})
+
+test('Home and recovery actions reflow without page-wide scrolling at laptop and zoomed widths', async (t) => {
+  const browser = requireBrowser(t)
+  if (!browser) return
+  const host = await startHarness()
+  t.after(() => host.stop())
+  for (const [width, height] of [[1280, 720], [1440, 900], [1920, 1080], [640, 720], [390, 844]] as const) {
+    const page = await browser.browser.newPage({ viewport: { width, height } })
+    try {
+      await page.goto(host.url)
+      await page.locator('main[aria-busy="false"]').waitFor()
+      const primary = page.getByRole('button', { name: 'View settings' })
+      assert.equal(await primary.isVisible(), true, `${width}: return action`)
+      if (width === 1280) assert.equal((await primary.boundingBox())!.y < height, true, 'return action above fold')
+      assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, `${width}: Home overflow`)
+      if (width < 760) {
+        await page.getByRole('button', { name: 'Menu' }).click()
+        await page.getByRole('dialog', { name: 'Friday navigation' }).getByRole('link', { name: 'Settings' }).click()
+      } else await page.getByRole('link', { name: 'Settings' }).click()
+      assert.equal(await page.getByRole('button', { name: 'Back up now' }).isVisible(), true)
+      assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, `${width}: Settings overflow`)
+    } finally { await page.close() }
+  }
+})
+
 test('a person previews and cancels a fixture root without granting permission, then approves and disables it', async (t) => {
   const browser = requireBrowser(t)
   if (!browser) return
@@ -93,6 +268,7 @@ test('a person previews and cancels a fixture root without granting permission, 
   t.after(() => host.stop())
   const page = await openShell(browser, host)
   t.after(() => page.close())
+  await page.getByRole('link', { name: 'Settings' }).click()
   await page.getByText('Windows support: ordinary local folders via manual path entry.', { exact: false }).waitFor()
   await page.getByRole('button', { name: /About Friday/ }).first().click()
   await page.getByRole('dialog', { name: /Friday v/ }).getByText('Cloud, WSL and network-share scan roots are not supported.', { exact: false }).waitFor()
@@ -113,24 +289,6 @@ test('a person previews and cancels a fixture root without granting permission, 
   assert.deepEqual(await (await fetch(`${host.url}/api/sources`)).json(), { sources: [] })
 })
 
-test('backup controls restore appearance through explicit preview and confirmation', async (t) => {
-  const browser = requireBrowser(t)
-  if (!browser) return
-  const host = await startHarness()
-  t.after(() => host.stop())
-  const page = await openShell(browser, host)
-  t.after(() => page.close())
-  await page.getByRole('button', { name: 'Dark', exact: true }).click()
-  await page.getByRole('button', { name: 'Back up now' }).click()
-  await page.getByText('Backup saved', { exact: false }).waitFor()
-  await page.getByRole('button', { name: 'System', exact: true }).click()
-  await page.locator('li').filter({ hasText: 'manual' }).getByRole('button', { name: 'Preview restore' }).click()
-  await page.getByText('Replace system with dark', { exact: false }).waitFor()
-  await page.getByRole('button', { name: 'Replace authored state' }).click()
-  await page.locator('button[aria-pressed="true"]').filter({ hasText: 'Dark' }).waitFor()
-  assert.equal(await page.getByRole('button', { name: 'Dark', exact: true }).getAttribute('aria-pressed'), 'true')
-})
-
 test('restored scan roots show as disabled without reloading the page', async (t) => {
   const browser = requireBrowser(t)
   if (!browser) return
@@ -141,6 +299,7 @@ test('restored scan roots show as disabled without reloading the page', async (t
   const page = await openShell(browser, host)
   t.after(() => page.close())
 
+  await page.getByRole('link', { name: 'Settings' }).click()
   await page.getByLabel('Native folder path').fill(root)
   await page.getByRole('button', { name: 'Preview local reads temporarily' }).click()
   await page.getByRole('button', { name: 'Approve exact scan root' }).click()
@@ -177,6 +336,7 @@ test('loading existing grants does not claim that no permission is configured', 
   hosts.push(first)
   const page = await openShell(browser, first)
   t.after(() => page.close())
+  await page.getByRole('link', { name: 'Settings' }).click()
   await page.getByLabel('Native folder path').fill(root)
   await page.getByRole('button', { name: 'Preview local reads temporarily' }).click()
   await page.getByRole('button', { name: 'Approve exact scan root' }).click()
@@ -187,6 +347,7 @@ test('loading existing grants does not claim that no permission is configured', 
   hosts.push(second)
   const reopened = await openShell(browser, second)
   t.after(() => reopened.close())
+  await reopened.getByRole('link', { name: 'Settings' }).click()
   await reopened.getByText('Local reads permitted').waitFor()
   assert.equal(await reopened.getByText('No local-read permission is configured.').count(), 0)
 })
@@ -229,6 +390,7 @@ test('appearance choice is saved through the API and survives a host restart', a
   const page = await openShell(browser, first)
   t.after(() => page.close())
 
+  await page.getByRole('link', { name: 'Settings' }).click()
   await page.getByRole('button', { name: 'Dark', exact: true }).click()
   await page.waitForFunction(
     () => document.documentElement.dataset.theme === 'dark',
@@ -255,6 +417,7 @@ test('appearance choice is saved through the API and survives a host restart', a
   hosts.push(second)
   const reopened = await openShell(browser, second)
   t.after(() => reopened.close())
+  await reopened.getByRole('link', { name: 'Settings' }).click()
 
   await reopened.waitForFunction(
     () => document.documentElement.dataset.theme === 'dark',
@@ -279,6 +442,7 @@ test('system appearance follows the OS preference until a fixed choice is made',
   const page = await openShell(browser, harness)
   t.after(() => page.close())
 
+  await page.getByRole('link', { name: 'Settings' }).click()
   await page.emulateMedia({ colorScheme: 'light' })
   await page.getByRole('button', { name: 'System', exact: true }).click()
   await page.waitForFunction(
@@ -345,6 +509,7 @@ test('the palette and a visible button invoke the same registered action', async
   const page = await openShell(browser, harness)
   t.after(() => page.close())
 
+  await page.getByRole('link', { name: 'Settings' }).click()
   const visible = page.getByRole('button', { name: 'Check local service' }).first()
   await visible.click()
   await page.waitForFunction(() =>
@@ -353,7 +518,7 @@ test('the palette and a visible button invoke the same registered action', async
     ),
   )
 
-  await page.getByRole('button', { name: /Open command palette/ }).click()
+  await page.getByRole('button', { name: /Search commands/ }).first().click()
   const dialog = page.getByRole('dialog', { name: 'Command palette' })
   await dialog.waitFor({ state: 'visible' })
   await page.waitForFunction(
@@ -372,6 +537,9 @@ test('the palette and a visible button invoke the same registered action', async
   const about = page.getByRole('dialog', { name: /Friday v/ })
   await about.waitFor({ state: 'visible' })
   assert.match((await about.textContent()) ?? '', /Roboto Flex/)
+  await about.getByRole('button', { name: 'Close' }).click()
+  await about.waitFor({ state: 'hidden' })
+  assert.equal(await page.getByRole('button', { name: /About Friday/ }).first().evaluate(el => el === document.activeElement), true)
 })
 
 test('reduced motion removes spatial transitions', async (t) => {
@@ -409,6 +577,7 @@ test('semantic roles keep readable contrast in both palettes', async (t) => {
   )
 
   for (const preference of ['Light', 'Dark'] as const) {
+    if (preference === 'Light') await page.getByRole('link', { name: 'Settings' }).click()
     await page.getByRole('button', { name: preference, exact: true }).click()
     await page.waitForFunction(
       (wanted) =>
@@ -419,7 +588,7 @@ test('semantic roles keep readable contrast in both palettes', async (t) => {
       const body = getComputedStyle(document.body)
       const primary = document.querySelector('.button--primary')
       const primaryStyle = primary ? getComputedStyle(primary) : null
-      const meta = document.querySelector('.ledger__meta')
+      const meta = document.querySelector('.settings-section p')
       return {
         surface: body.backgroundColor,
         text: body.color,

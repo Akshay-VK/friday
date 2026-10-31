@@ -95,8 +95,8 @@ export function searchActions(query: string): Promise<{
   return request(`/api/search?q=${encodeURIComponent(query)}`)
 }
 
-export type Backup = { id: string; createdAt: string; kind: string; counts: { preferences: number } }
-export type RestorePreview = { confirmation: string; currentTheme: ThemePreference; restoredTheme: ThemePreference; counts: { preferences: number }; excluded: string[]; createdAt: string }
+export type Backup = { id: string; createdAt: string; kind: string; counts: { preferences: number; sources?: number } }
+export type RestorePreview = { confirmation: string; currentTheme: ThemePreference; restoredTheme: ThemePreference; counts: { preferences: number; sources?: number }; excluded: string[]; createdAt: string }
 
 function protectedPost<T>(path: string, body: object = {}): Promise<T> {
   if (!csrfToken) return Promise.reject(new ApiError('Session authorisation is not available yet', 0))

@@ -19,3 +19,7 @@ Use the five default triage labels. See `docs/agents/triage-labels.md`.
 ### Domain docs
 
 Single-context: root `GLOSSARY.md` and `docs/adr/`. See `docs/agents/domain.md`.
+
+### Model policy
+
+Free models only (`opencode/deepseek-v4.1-flash-free`). Do not launch a paid model for any agent, subagent, or merger, even if an earlier session authorized one; that needs a new explicit owner instruction. Check spend with `opencode stats --cost`. If a free model is unavailable, stop and report rather than silently switching to a paid one.

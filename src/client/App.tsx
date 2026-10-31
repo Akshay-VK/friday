@@ -122,8 +122,9 @@ export function App() {
       setTheme(restored)
       applyTheme(restored)
       setRestorePlan(null)
+      setSourceRefresh((value) => value + 1)
       await refreshBackups()
-      setBackupMessage('Authored state restored. A pre-restore backup was saved.')
+      setBackupMessage('Authored state restored. A pre-restore backup was saved. Restored scan roots are disabled.')
     } catch (error) { setRestorePlan(null); setBackupMessage(`Restore refused: ${error instanceof Error ? error.message : String(error)}`) }
     finally { setBackupBusy(false) }
   }
@@ -452,7 +453,7 @@ export function App() {
                     </button>
                   </div>
                   <p className="hero__footnote">
-                    Only your explicit preview reads folder metadata. Friday does not read credentials, open a program, or run a work command here.
+                    Preview reads folder metadata only when you ask. An approved root gets an existence check when grants load. Friday does not read credentials, open a program, or run a work command here.
                   </p>
                 </div>
                 <div className="hero__motif" aria-hidden="true">

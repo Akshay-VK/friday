@@ -2,16 +2,18 @@ import { useEffect, useRef, useState } from 'react'
 import { approveSource, cancelSource, disableSource, listSources, pickSource, previewSource, revokeSource, type Source, type SourcePreview } from './api.ts'
 
 export function Sources({ ready, refreshKey }: { ready: boolean; refreshKey: number }) {
-  const [sources, setSources] = useState<Source[]>([])
+  const [sources, setSources] = useState<Source[] | null>(null)
   const [path, setPath] = useState('')
   const [exclusions, setExclusions] = useState('')
   const [preview, setPreview] = useState<SourcePreview | null>(null)
-  const [message, setMessage] = useState('No local-read permission is configured. Nothing is scanned automatically.')
+  const [message, setMessage] = useState('')
   const [busy, setBusy] = useState(false)
   const pendingPreview = useRef<string | null>(null)
   useEffect(() => {
     if (ready) void listSources().then((state) => setSources(state.sources)).catch(() => setMessage('Could not load scan roots. Retry after reconnecting to Friday.'))
   }, [ready, refreshKey])
+  // A restore invalidates an open review; backup refreshes the grant list too.
+  useEffect(() => { setPreview(null); pendingPreview.current = null; setMessage('') }, [refreshKey])
   const refresh = async () => setSources((await listSources()).sources)
   const run = async (work: () => Promise<void>) => {
     setBusy(true)
@@ -27,8 +29,9 @@ export function Sources({ ready, refreshKey }: { ready: boolean; refreshKey: num
   })
   return <section className="actions" aria-labelledby="sources-title">
     <div className="section-head"><h2 id="sources-title" className="title-large">Scan roots</h2><p className="section-head__note">Windows support: ordinary local folders via manual path entry. Cloud, WSL and network-share scan roots are not supported. Preview is metadata-only; no project collection runs yet. Browse is unverified; use manual entry. Network access and Open / Run execution require separate permission.</p></div>
-    <p role="status">{message}</p>
-    <ul>{sources.map((source) => <li key={source.id}>
+    {message && <p role="status">{message}</p>}
+    {sources?.length === 0 && <p role="status">No local-read permission is configured. Nothing is scanned automatically.</p>}
+    <ul>{(sources ?? []).map((source) => <li key={source.id}>
       <code>{source.path}</code> · {source.host} · {source.enabled ? 'Local reads permitted' : 'Disabled; no reads'} · {source.health === 'ready' ? 'present (identity not rechecked)' : source.health}
       {source.exclusions.length > 0 && <span> · excludes {source.exclusions.join(', ')}</span>}{' '}
       <button type="button" className="button button--quiet" disabled={!ready || !source.enabled} onClick={() => void run(async () => { await disableSource(source); pendingPreview.current = null; setPreview(null); await refresh(); setMessage('Scan root disabled. To use it again, preview and approve a new scope.') })}>Disable</button>{' '}

@@ -131,6 +131,66 @@ test('backup controls restore appearance through explicit preview and confirmati
   assert.equal(await page.getByRole('button', { name: 'Dark', exact: true }).getAttribute('aria-pressed'), 'true')
 })
 
+test('restored scan roots show as disabled without reloading the page', async (t) => {
+  const browser = requireBrowser(t)
+  if (!browser) return
+  const root = await mkdtemp(join(tmpdir(), 'friday-browser-restore-source-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const host = await startHarness()
+  t.after(() => host.stop())
+  const page = await openShell(browser, host)
+  t.after(() => page.close())
+
+  await page.getByLabel('Native folder path').fill(root)
+  await page.getByRole('button', { name: 'Preview local reads temporarily' }).click()
+  await page.getByRole('button', { name: 'Approve exact scan root' }).click()
+  await page.getByText('Local reads permitted').waitFor()
+  await page.getByRole('button', { name: 'Back up now' }).click()
+  await page.getByText('Backup saved', { exact: false }).waitFor()
+  await page.getByRole('button', { name: 'Preview local reads temporarily' }).click()
+  await page.getByRole('group', { name: 'Review scan root' }).waitFor()
+  await page.locator('li').filter({ hasText: 'manual' }).getByRole('button', { name: 'Preview restore' }).click()
+  await page.getByRole('button', { name: 'Replace authored state' }).click()
+  await page.getByText('Authored state restored.', { exact: false }).waitFor()
+
+  await page.getByText('Disabled; no reads').waitFor()
+  await page.getByRole('group', { name: 'Review scan root' }).waitFor({ state: 'hidden' })
+  assert.equal(await page.getByText('Local reads permitted').count(), 0)
+  assert.equal(await page.getByText('No local-read permission is configured.').count(), 0)
+  const restored = (await (await fetch(`${host.url}/api/sources`)).json()) as { sources: { enabled: boolean }[] }
+  assert.deepEqual(restored.sources.map((source) => source.enabled), [false])
+})
+
+test('loading existing grants does not claim that no permission is configured', async (t) => {
+  const browser = requireBrowser(t)
+  if (!browser) return
+  const root = await mkdtemp(join(tmpdir(), 'friday-browser-existing-source-'))
+  const dataHome = await mkdtemp(join(tmpdir(), 'friday-browser-existing-home-'))
+  const hosts: Harness[] = []
+  t.after(async () => {
+    for (const host of hosts.reverse()) await host.stop()
+    await rm(root, { recursive: true, force: true })
+    await rm(dataHome, { recursive: true, force: true })
+  })
+
+  const first = await startHarness({ dataHome, keepDataHome: true })
+  hosts.push(first)
+  const page = await openShell(browser, first)
+  t.after(() => page.close())
+  await page.getByLabel('Native folder path').fill(root)
+  await page.getByRole('button', { name: 'Preview local reads temporarily' }).click()
+  await page.getByRole('button', { name: 'Approve exact scan root' }).click()
+  await page.getByText('Local reads permitted').waitFor()
+  await first.stop()
+
+  const second = await startHarness({ dataHome, keepDataHome: true })
+  hosts.push(second)
+  const reopened = await openShell(browser, second)
+  t.after(() => reopened.close())
+  await reopened.getByText('Local reads permitted').waitFor()
+  assert.equal(await reopened.getByText('No local-read permission is configured.').count(), 0)
+})
+
 test('keyboard focus is visible and the skip link is first', async (t) => {
   const browser = requireBrowser(t)
   if (!browser) return

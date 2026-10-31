@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ApiError, getBootstrap, getHealth, rememberCsrfToken, saveTheme, createBackup, listBackups, previewRestore, restoreBackup, type Backup, type RestorePreview, type ThemePreference } from './api.ts'
 import { HomeIcon, InfoIcon, SearchIcon, ServiceIcon, SunIcon, MoonIcon, SystemIcon, PaletteIcon } from './icons.tsx'
 import { CommandPalette } from './Palette.tsx'
+import { Sources } from './Sources.tsx'
 import { createActionRegistry, type ActionContext } from './registry.ts'
 import { applyTheme, resolveTheme, systemPrefersDark, THEME_OPTIONS, watchSystemTheme } from './theme.ts'
 
@@ -27,6 +28,7 @@ export function App() {
   const [restorePlan, setRestorePlan] = useState<{ id: string; preview: RestorePreview } | null>(null)
   const [restoreError, setRestoreError] = useState('')
   const [backupBusy, setBackupBusy] = useState(false)
+  const [sourceRefresh, setSourceRefresh] = useState(0)
   const [paletteOpen, setPaletteOpen] = useState(false)
   const [aboutOpen, setAboutOpen] = useState(false)
   const paletteInvoker = useRef<HTMLElement | null>(null)
@@ -150,8 +152,8 @@ export function App() {
     try {
       const { theme: restored } = await restoreBackup(restorePlan.id, restorePlan.preview.confirmation)
       themeRef.current = restored; setTheme(restored); applyTheme(restored)
-      setRestorePlan(null); await refreshBackups()
-      setBackupMessage('Authored state restored. A pre-restore backup was saved.')
+      setRestorePlan(null); setSourceRefresh(value => value + 1); await refreshBackups()
+      setBackupMessage('Authored state restored. A pre-restore backup was saved. Restored scan roots are disabled.')
     } catch (error) { setRestoreError(`Restore refused: ${error instanceof Error ? error.message : String(error)}. Check the Friday data home and retry or cancel.`) }
     finally { setBackupBusy(false) }
   }
@@ -168,19 +170,19 @@ export function App() {
         {phase === 'failed' ? <section className="panel panel--error" role="alert"><h1 className="headline" ref={headingRef} tabIndex={-1}>Friday could not connect to its local service</h1><p>Nothing was changed. Check that the server is running on this machine.</p><p>{loadError}</p><button type="button" className="button button--primary" onClick={() => location.reload()}>Try again</button></section> : phase === 'loading' ? <section className="panel" role="status"><h1 className="headline">Friday</h1><p>Connecting to the local service…</p></section> : route === 'home' ? <>
           <h1 className="headline route-title" ref={headingRef} tabIndex={-1}>Home</h1>
           {(backupMessage.startsWith('Backup failed') || backupListMessage !== '') && <section className="attention" aria-label="Attention"><h2>Backup needs attention</h2><p>{backupListMessage || backupMessage}</p><button type="button" className="button button--quiet" onClick={() => navigate('settings')}>Open recovery settings</button></section>}
-          <section className="return-surface" aria-labelledby="return-title"><div className="return-surface__body"><h2 id="return-title" className="display">Nothing to resume yet</h2><p>No project source is connected to this build. Friday can check its local service and keep your appearance and recovery preferences; source setup is not available yet.</p><div className="hero__actions"><button type="button" className="button button--primary" onClick={() => navigate('settings')}>View settings</button><button type="button" className="button button--tonal" onClick={openPalette}>Search commands</button></div></div><div className="return-surface__seam"><ServiceIcon /><span>{health.error ? 'Service check failed' : health.checkedAt ? `Service responded at ${health.checkedAt}` : 'Checking local service…'}</span></div></section>
+          <section className="return-surface" aria-labelledby="return-title"><div className="return-surface__body"><h2 id="return-title" className="display">Nothing to resume yet</h2><p>No project has been discovered yet. Approving a local read scope does not start collection. Friday can check its local service and keep your appearance and recovery preferences.</p><div className="hero__actions"><button type="button" className="button button--primary" onClick={() => navigate('settings')}>View settings</button><button type="button" className="button button--tonal" onClick={openPalette}>Search commands</button></div></div><div className="return-surface__seam"><ServiceIcon /><span>{health.error ? 'Service check failed' : health.checkedAt ? `Service responded at ${health.checkedAt}` : 'Checking local service…'}</span></div></section>
           <section className="home-capabilities" aria-labelledby="capabilities"><h2 id="capabilities" className="title-large">What Friday can do now</h2><p>Check the local service, find registered commands, save appearance, and back up or restore authored preferences.</p><button type="button" className="button button--quiet" onClick={() => navigate('settings')}>Manage appearance and recovery</button></section>
         </> : <>
           <h1 className="headline route-title" ref={headingRef} tabIndex={-1}>Settings</h1>
           <section className="settings-section" aria-labelledby="appearance"><h2 id="appearance" className="title-large">Appearance</h2><p>{theme === 'system' ? `Following system (${resolveTheme(theme)})` : `${theme === 'light' ? 'Light' : 'Dark'} palette`} is selected. Saved in Friday’s data home.</p><div className="theme" role="group" aria-label="Appearance">{THEME_OPTIONS.map(option => { const Icon = THEME_ICONS[option.value]; return <button key={option.value} type="button" className="theme__option" aria-pressed={theme === option.value} disabled={phase !== 'ready'} title={option.description} onClick={() => void chooseTheme(option.value)}><Icon size={18}/><span>{option.label}</span></button> })}</div></section>
-          <section className="settings-section" aria-labelledby="sources"><h2 id="sources" className="title-large">Sources</h2><p>Source setup is not available in this build. Friday does not scan project folders here.</p></section>
+          <Sources ready={phase === 'ready'} refreshKey={sourceRefresh} />
           <section className="settings-section" aria-labelledby="service"><h2 id="service" className="title-large">Local service</h2><p role="status">{health.error ? `Check failed: ${health.error}${health.checkedAt ? `. Last responded at ${health.checkedAt}.` : ''}` : health.checkedAt ? `Responded at ${health.checkedAt}, version ${health.version}.` : 'Checking the local service…'}</p><button type="button" className="button button--quiet" onClick={() => void runAction('friday.check-service')}>Check local service</button></section>
-          <section className="settings-section" aria-labelledby="recovery"><h2 id="recovery" className="title-large">Recovery</h2><p>Copies include authored preferences, currently appearance. Same-disk copies do not protect against device loss.</p><button type="button" className="button button--primary" disabled={backupBusy} onClick={() => void backupNow()}>Back up now</button>{backupMessage && <p role="status" className={backupMessage.includes('failed') || backupMessage.includes('refused') ? 'error-text' : ''}>{backupMessage}</p>}<p role="status" className={backupListMessage ? 'error-text' : ''}>{backupListMessage || (backups.length ? 'Latest known copies below.' : 'No backup yet.')}{backupsStale ? ' Showing last known copies.' : ''}</p>{backupsStale && <button type="button" className="button button--quiet" onClick={() => void refreshBackups()}>Retry backup list</button>}<ul className="backup-list">{backups.map(backup => <li key={backup.id}><span>{backup.kind} backup, {new Date(backup.createdAt).toLocaleString()} — {backup.counts.preferences} preference(s)</span><button type="button" className="button button--quiet" disabled={backupBusy} onClick={() => void preview(backup.id)}>Preview restore</button></li>)}</ul></section>
+          <section className="settings-section" aria-labelledby="recovery"><h2 id="recovery" className="title-large">Recovery</h2><p>Copies include authored appearance and scan-root configuration. Restored roots are disabled; same-disk copies do not protect against device loss.</p><button type="button" className="button button--primary" disabled={backupBusy} onClick={() => void backupNow()}>Back up now</button>{backupMessage && <p role="status" className={backupMessage.includes('failed') || backupMessage.includes('refused') ? 'error-text' : ''}>{backupMessage}</p>}<p role="status" className={backupListMessage ? 'error-text' : ''}>{backupListMessage || (backups.length ? 'Latest known copies below.' : 'No backup yet.')}{backupsStale ? ' Showing last known copies.' : ''}</p>{backupsStale && <button type="button" className="button button--quiet" onClick={() => void refreshBackups()}>Retry backup list</button>}<ul className="backup-list">{backups.map(backup => <li key={backup.id}><span>{backup.kind} backup, {new Date(backup.createdAt).toLocaleString()} — {backup.counts.preferences} preference(s), {backup.counts.sources ?? 0} scan root(s)</span><button type="button" className="button button--quiet" disabled={backupBusy} onClick={() => void preview(backup.id)}>Preview restore</button></li>)}</ul></section>
         </>}
       </main><footer className="footer"><p>Friday v{version} · Your state stays in Friday's own data home.</p><button type="button" className="footer__link" onClick={() => void runAction('friday.about')}>About &amp; licences</button></footer></div>
     <p className="sr-only" role="status" aria-live="polite">{announcement}</p>
     <dialog ref={menuRef} className="nav-dialog" aria-label="Friday navigation" onCancel={event => { event.preventDefault(); setMenuOpen(false) }}><div className="nav-dialog__head"><strong>Friday</strong><button type="button" className="button button--quiet" onClick={() => setMenuOpen(false)}>Close menu</button></div><nav aria-label="Mobile primary"><ul><li>{nav('home')}</li><li>{nav('settings')}</li></ul></nav></dialog>
-    <dialog ref={restoreRef} className="about restore-dialog" aria-labelledby="restore-title" onCancel={event => { event.preventDefault(); if (!backupBusy) setRestorePlan(null) }}>{restorePlan && <><h2 id="restore-title" className="title-large">Confirm restore</h2><p>Backup from {new Date(restorePlan.preview.createdAt).toLocaleString()}. Replace {restorePlan.preview.currentTheme} with {restorePlan.preview.restoredTheme}?</p><p>Included: {restorePlan.preview.counts.preferences} authored preference(s). Excluded: {restorePlan.preview.excluded.join(', ') || 'none'}. A pre-restore copy of current state is required before replacement.</p>{restoreError && <p role="alert" className="error-text">{restoreError}</p>}<div className="dialog-actions"><button type="button" className="button button--quiet" disabled={backupBusy} onClick={() => setRestorePlan(null)}>Cancel restore</button><button type="button" className="button button--primary" disabled={backupBusy} onClick={() => void replace()}>{restoreError ? 'Retry restore' : 'Replace authored state'}</button></div></>}</dialog>
+    <dialog ref={restoreRef} className="about restore-dialog" aria-labelledby="restore-title" onCancel={event => { event.preventDefault(); if (!backupBusy) setRestorePlan(null) }}>{restorePlan && <><h2 id="restore-title" className="title-large">Confirm restore</h2><p>Backup from {new Date(restorePlan.preview.createdAt).toLocaleString()}. Replace {restorePlan.preview.currentTheme} with {restorePlan.preview.restoredTheme}?</p><p>Included: {restorePlan.preview.counts.preferences} authored preference(s) and {restorePlan.preview.counts.sources ?? 0} scan root(s), restored disabled. Excluded: {restorePlan.preview.excluded.join(', ') || 'none'}. A pre-restore copy of current state is required before replacement.</p>{restoreError && <p role="alert" className="error-text">{restoreError}</p>}<div className="dialog-actions"><button type="button" className="button button--quiet" disabled={backupBusy} onClick={() => setRestorePlan(null)}>Cancel restore</button><button type="button" className="button button--primary" disabled={backupBusy} onClick={() => void replace()}>{restoreError ? 'Retry restore' : 'Replace authored state'}</button></div></>}</dialog>
     <CommandPalette open={paletteOpen} actions={actions} onClose={() => setPaletteOpen(false)} onInvoke={id => void runAction(id)} />
     <AboutDialog open={aboutOpen} version={version} onClose={() => setAboutOpen(false)} />
   </div>
@@ -223,9 +225,9 @@ function AboutDialog({
         </h2>
       </div>
       <p className="body">
-        A local, read-only control room for your laptop. This slice is a
-        foundation: loopback-only HTTP, a single-owner SQLite store with FTS5,
-        one restart-persistent appearance preference, and one command palette.
+        Friday keeps its state outside your projects. This build supports
+        explicit, bounded local-root metadata preview and approval; it does not
+        collect projects yet. Cloud, WSL and network-share scan roots are not supported.
       </p>
       <dl className="about__meta">
         <div>
@@ -239,7 +241,7 @@ function AboutDialog({
         <div>
           <dt>Not in this build</dt>
           <dd>
-            Source scanning, credentials, network integrations, OpenCode
+             Project collection, credentials, network integrations, OpenCode
             service, Telegram, and Run execution
           </dd>
         </div>

@@ -4,6 +4,8 @@ This document maps [the original spec](../Friday%20a%20read-only%20control%20roo
 
 References: [PRD](PRD.md), [UX](UX-SPEC.md), [technical design](TECHNICAL-DESIGN.md), [delivery/test catalog](DELIVERY-PLAN.md).
 
+**Implementation decision, 2026-10-30 (#4):** Owner approved closing #4 on verified ordinary local Windows roots via manual entry only; this does not change the original safety requirements or authorize other roots. Real picker select/cancel (VG-03), genuine cloud-placeholder nonhydration (SAFE-06/T02), and exhaustive native Windows attempted-write tracing including Git/hidden/ignored/untracked entries (SAFE-01/T01, VG-02) are **not passed** and move to #57, which blocks final hardened #55, not #4. UNC/share, WSL, cloud, reparse and uncertain paths stay refused until independently verified. Current grants have no durable file identity for future collectors: before consuming a grant they must verify identity, containment, host and no-follow behavior again; `ready` reports existence only. The original included/revised/deferred dispositions below remain the product contract, not a claim of implementation acceptance.
+
 ## 1. Original sections 1–3: contract, use cases, architecture
 
 | Original provision | Disposition | Destination / rationale |

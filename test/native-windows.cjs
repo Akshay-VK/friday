@@ -1,0 +1,25 @@
+// Run with node.exe, not WSL node. Uses only a newly created fixture in the OS temp.
+const assert = require('node:assert/strict')
+const fs = require('node:fs')
+const os = require('node:os')
+const path = require('node:path')
+assert.equal(process.platform, 'win32', 'This probe must run in native Windows Node')
+const root = fs.mkdtempSync(path.join(os.tmpdir(), 'friday-native-fixture-'))
+try {
+  const folder = path.join(root, 'work')
+  const sibling = path.join(root, 'work2')
+  const dataHome = path.join(root, 'friday-home')
+  fs.mkdirSync(folder)
+  fs.mkdirSync(sibling)
+  fs.mkdirSync(dataHome)
+  assert.equal(path.relative(folder, sibling).startsWith('..'), true, 'prefix collision is not containment')
+  assert.equal(path.win32.isAbsolute('C:relative'), false)
+  assert.equal(path.win32.isAbsolute('C:\\absolute'), true)
+  const alias = path.join(folder, 'linked-home')
+  fs.symlinkSync(dataHome, alias, 'junction')
+  assert.equal(fs.lstatSync(alias).isSymbolicLink(), true)
+  assert.equal(fs.realpathSync.native(alias), fs.realpathSync.native(dataHome))
+  console.log('PASS native Windows drive-relative, sibling collision and junction fixture; placeholder and picker remain unverified')
+} finally {
+  fs.rmSync(root, { recursive: true, force: true })
+}

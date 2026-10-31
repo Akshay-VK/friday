@@ -4,6 +4,8 @@ import { createHash } from 'node:crypto'
 import { createBackup } from './backups.ts'
 
 export type ThemePreference = 'light' | 'dark' | 'system'
+export type Source = { id: string; path: string; nativePath: string; host: string; exclusions: string[]; enabled: boolean; revision: number; health: 'ready' | 'offline' | 'denied' | 'disabled' }
+export type Approval = { id: string; owner: string; expires: number; generation: number; path: string; nativePath: string; host: string; exclusions: string[]; identity?: string }
 
 export const THEMES: readonly ThemePreference[] = ['light', 'dark', 'system']
 const MIGRATION_2 = 'CREATE TABLE migration_history (version INTEGER PRIMARY KEY, checksum TEXT NOT NULL, applied_at TEXT NOT NULL)'
@@ -23,6 +25,15 @@ export type StoreWorkerInput =
   | { type: 'previewRestore'; id: number; backupId: string }
   | { type: 'restore'; id: number; backupId: string; confirmation: string }
   | { type: 'dailyBackup'; id: number; now?: string }
+  | { type: 'listSources'; id: number }
+  | { type: 'addSource'; id: number; source: Source }
+  | { type: 'registerApproval'; id: number; approval: Approval }
+  | { type: 'cancelApproval'; id: number; approvalId: string; owner: string }
+  | { type: 'approveSource'; id: number; approvalId: string; owner: string; source: Source; identity?: string; generation: number; leaseDeadline?: number; lease?: SharedArrayBuffer }
+  | { type: 'invalidateApprovals'; id: number; paths: string[] }
+  | { type: 'disableSource'; id: number; sourceId: string; revision: number }
+  | { type: 'setSourceHealth'; id: number; sourceId: string; revision: number; health: Source['health'] }
+  | { type: 'revokeSource'; id: number; sourceId: string }
   | { type: 'close'; id: number }
 
 export type StoreWorkerOutput =
@@ -42,7 +53,7 @@ export function openStore(dataHome: string) {
 
 function migrate(db: Database.Database, dataHome: string) {
   const version = db.pragma('user_version', { simple: true }) as number
-  if (version > 2) throw new Error('Store schema is newer than this Friday version; update Friday, do not downgrade the data')
+  if (version > 3) throw new Error('Store schema is newer than this Friday version; update Friday, do not downgrade the data')
   if (version < 1) {
     db.transaction(() => {
       db.exec(`
@@ -82,6 +93,33 @@ function migrate(db: Database.Database, dataHome: string) {
   }
   const applied = db.prepare('SELECT version, checksum FROM migration_history').all() as Array<{ version: number; checksum: string }>
   if (applied.length !== 1 || applied[0]?.version !== 2 || applied[0].checksum !== MIGRATION_2_HASH) throw new Error('Store migration record is incompatible; restore a verified copy or use a compatible Friday version')
+  if ((db.pragma('user_version', { simple: true }) as number) === 2) {
+    if (version === 2) createBackup(db, dataHome, 'pre-migration')
+    db.transaction(() => {
+      db.exec('CREATE TABLE sources (id TEXT PRIMARY KEY, path TEXT NOT NULL, native_path TEXT NOT NULL, host TEXT NOT NULL, exclusions TEXT NOT NULL, enabled INTEGER NOT NULL, revision INTEGER NOT NULL, health TEXT NOT NULL); PRAGMA user_version = 3;')
+    })()
+  }
+}
+
+export function listSources(db: Database.Database): Source[] {
+  return (db.prepare('SELECT * FROM sources ORDER BY rowid').all() as Array<{ id: string; path: string; native_path: string; host: string; exclusions: string; enabled: number; revision: number; health: Source['health'] }>).map((row) => ({ id: row.id, path: row.path, nativePath: row.native_path, host: row.host, exclusions: JSON.parse(row.exclusions) as string[], enabled: row.enabled === 1, revision: row.revision, health: row.health }))
+}
+
+export function addSource(db: Database.Database, source: Source): Source {
+  db.prepare('INSERT INTO sources VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(source.id, source.path, source.nativePath, source.host, JSON.stringify(source.exclusions), source.enabled ? 1 : 0, source.revision, source.health)
+  return source
+}
+
+export function disableSource(db: Database.Database, id: string, revision: number): Source {
+  if (!db.prepare("UPDATE sources SET enabled=0, health='disabled', revision=revision+1 WHERE id=? AND revision=?").run(id, revision).changes) throw new Error('Source changed or was removed; refresh before disabling')
+  return listSources(db).find((source) => source.id === id)!
+}
+
+export function setSourceHealth(db: Database.Database, id: string, revision: number, health: Source['health']): Source {
+  db.prepare('UPDATE sources SET health=? WHERE id=? AND revision=? AND enabled=1').run(health, id, revision)
+  const source = listSources(db).find((item) => item.id === id)
+  if (!source) throw new Error('Source was removed')
+  return source
 }
 
 export function getTheme(db: Database.Database): ThemePreference {

@@ -11,6 +11,7 @@ import {
 } from './security.ts'
 import type { StoreClient } from './store/client.ts'
 import { isTheme } from './store/schema.ts'
+import { registerSources, type SourceAdapters } from './sources.ts'
 
 export type FridayApp = {
   app: Hono
@@ -23,6 +24,7 @@ export function createApp(options: {
   store: StoreClient
   diagnostics?: boolean
   staticRoot?: string
+  sourceAdapters?: SourceAdapters
 }): FridayApp {
   const app = new Hono()
   const security = createLocalSecurity({
@@ -87,6 +89,8 @@ export function createApp(options: {
     return c.json({ theme: await options.store.setTheme(value) })
   })
 
+  const invalidatePreviews = registerSources(app, security, options.store, options.dataHome, options.sourceAdapters)
+
   app.get('/api/backups', async (c) => c.json(await options.store.listBackups()))
   app.post('/api/backups/create', security.mutationGuard, async (c) => {
     try { return c.json(await options.store.createBackup()) }
@@ -101,7 +105,7 @@ export function createApp(options: {
   app.post('/api/backups/restore', security.mutationGuard, async (c) => {
     const body = await c.req.json().catch(() => null) as { id?: unknown; confirmation?: unknown } | null
     if (typeof body?.id !== 'string' || typeof body.confirmation !== 'string') return c.json({ error: 'Preview and explicitly confirm replacement first' }, 400)
-    try { return c.json(await options.store.restore(body.id, body.confirmation)) }
+    try { const result = await options.store.restore(body.id, body.confirmation); invalidatePreviews(); return c.json(result) }
     catch { return c.json({ error: 'Restore refused. Preview again; check backup integrity, free space and permissions. Current state was not replaced.' }, 400) }
   })
 

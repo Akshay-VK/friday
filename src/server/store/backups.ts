@@ -10,7 +10,7 @@ import { isTheme, listSources, type Source } from './schema.ts'
 export const AUTHORED_TABLES = ['preferences', 'sources'] as const
 export const AUTHORED_FILES: readonly string[] = []
 const FORMAT = 1
-const SCHEMA = 3
+const SCHEMA = 4
 type Row = { key: string; value: string; revision: number; updated_at: string }
 type Manifest = { format: number; schemaVersion: number; appVersion: string; createdAt: string; kind: string; counts: { preferences: number; sources?: number; files: number }; checksum: string; inventory: { tables: string[]; files: string[] } }
 
@@ -39,7 +39,7 @@ function inspectPath(path: string): { manifest: Manifest; rows: { preferences: R
   const files = readdirSync(path).sort()
   if (files.join(',') !== 'manifest.json,state.sqlite' || !lstatSync(path).isDirectory() || files.some((file) => !lstatSync(join(path, file)).isFile())) throw new Error('Snapshot files are missing or unexpected')
   const manifest = JSON.parse(readFileSync(join(path, 'manifest.json'), 'utf8')) as Manifest
-  if (manifest.format !== FORMAT || ![2, SCHEMA].includes(manifest.schemaVersion) || manifest.appVersion !== APP_VERSION || manifest.inventory?.tables?.join(',') !== (manifest.schemaVersion === 2 ? 'preferences' : AUTHORED_TABLES.join(',')) || manifest.inventory?.files?.length !== 0 || manifest.counts?.files !== 0 || !Number.isFinite(Date.parse(manifest.createdAt))) throw new Error('Snapshot format or schema is incompatible with this Friday version')
+  if (manifest.format !== FORMAT || ![2, 3, SCHEMA].includes(manifest.schemaVersion) || manifest.appVersion !== APP_VERSION || manifest.inventory?.tables?.join(',') !== (manifest.schemaVersion === 2 ? 'preferences' : AUTHORED_TABLES.join(',')) || manifest.inventory?.files?.length !== 0 || manifest.counts?.files !== 0 || !Number.isFinite(Date.parse(manifest.createdAt))) throw new Error('Snapshot format or schema is incompatible with this Friday version')
   const file = join(path, 'state.sqlite')
   if (hash(readFileSync(file)) !== manifest.checksum) throw new Error('Snapshot checksum mismatch')
   const snapshot = new Database(file, { readonly: true, fileMustExist: true })
@@ -68,12 +68,12 @@ export function createBackup(db: Database.Database, home: string, kind = 'manual
     const snapshotFile = join(staging, 'state.sqlite')
     const snapshot = new Database(snapshotFile)
     try {
-      snapshot.exec('CREATE TABLE preferences (key TEXT PRIMARY KEY, value TEXT NOT NULL, revision INTEGER NOT NULL, updated_at TEXT NOT NULL); CREATE TABLE sources (id TEXT PRIMARY KEY, path TEXT NOT NULL, native_path TEXT NOT NULL, host TEXT NOT NULL, exclusions TEXT NOT NULL, enabled INTEGER NOT NULL, revision INTEGER NOT NULL, health TEXT NOT NULL); PRAGMA user_version = 3;')
+      snapshot.exec('CREATE TABLE preferences (key TEXT PRIMARY KEY, value TEXT NOT NULL, revision INTEGER NOT NULL, updated_at TEXT NOT NULL); CREATE TABLE sources (id TEXT PRIMARY KEY, path TEXT NOT NULL, native_path TEXT NOT NULL, host TEXT NOT NULL, exclusions TEXT NOT NULL, enabled INTEGER NOT NULL, revision INTEGER NOT NULL, health TEXT NOT NULL, identity TEXT); PRAGMA user_version = 4;')
       const insert = snapshot.prepare('INSERT INTO preferences (key, value, revision, updated_at) VALUES (@key, @value, @revision, @updated_at)')
       snapshot.transaction(() => {
         for (const row of data) insert.run(row)
-        const add = snapshot.prepare('INSERT INTO sources VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
-        for (const source of sourceData) add.run(source.id, source.path, source.nativePath, source.host, JSON.stringify(source.exclusions), source.enabled ? 1 : 0, source.revision, source.health)
+        const add = snapshot.prepare('INSERT INTO sources VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
+        for (const source of sourceData) add.run(source.id, source.path, source.nativePath, source.host, JSON.stringify(source.exclusions), source.enabled ? 1 : 0, source.revision, source.health, source.identity ?? null)
       })()
     } finally { snapshot.close() }
     sync(snapshotFile)

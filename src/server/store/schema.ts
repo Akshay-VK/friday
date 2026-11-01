@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto'
 import { createBackup } from './backups.ts'
 
 export type ThemePreference = 'light' | 'dark' | 'system'
-export type Source = { id: string; path: string; nativePath: string; host: string; exclusions: string[]; enabled: boolean; revision: number; health: 'ready' | 'offline' | 'denied' | 'disabled' }
+export type Source = { id: string; path: string; nativePath: string; host: string; exclusions: string[]; enabled: boolean; revision: number; health: 'ready' | 'offline' | 'denied' | 'disabled'; identity?: string }
 export type Approval = { id: string; owner: string; expires: number; generation: number; path: string; nativePath: string; host: string; exclusions: string[]; identity?: string }
 
 export const THEMES: readonly ThemePreference[] = ['light', 'dark', 'system']
@@ -34,6 +34,8 @@ export type StoreWorkerInput =
   | { type: 'disableSource'; id: number; sourceId: string; revision: number }
   | { type: 'setSourceHealth'; id: number; sourceId: string; revision: number; health: Source['health'] }
   | { type: 'revokeSource'; id: number; sourceId: string }
+  | { type: 'commitInventory'; id: number; sourceId: string; revision: number; identity: string; observations: string[]; partial: boolean }
+  | { type: 'getInventory'; id: number; sourceId: string }
   | { type: 'close'; id: number }
 
 export type StoreWorkerOutput =
@@ -53,7 +55,7 @@ export function openStore(dataHome: string) {
 
 function migrate(db: Database.Database, dataHome: string) {
   const version = db.pragma('user_version', { simple: true }) as number
-  if (version > 3) throw new Error('Store schema is newer than this Friday version; update Friday, do not downgrade the data')
+  if (version > 4) throw new Error('Store schema is newer than this Friday version; update Friday, do not downgrade the data')
   if (version < 1) {
     db.transaction(() => {
       db.exec(`
@@ -99,14 +101,20 @@ function migrate(db: Database.Database, dataHome: string) {
       db.exec('CREATE TABLE sources (id TEXT PRIMARY KEY, path TEXT NOT NULL, native_path TEXT NOT NULL, host TEXT NOT NULL, exclusions TEXT NOT NULL, enabled INTEGER NOT NULL, revision INTEGER NOT NULL, health TEXT NOT NULL); PRAGMA user_version = 3;')
     })()
   }
+  if ((db.pragma('user_version', { simple: true }) as number) === 3) {
+    if (version === 3) createBackup(db, dataHome, 'pre-migration')
+    db.transaction(() => {
+      db.exec('ALTER TABLE sources ADD COLUMN identity TEXT; CREATE TABLE inventory (source_id TEXT PRIMARY KEY REFERENCES sources(id) ON DELETE CASCADE, observations TEXT NOT NULL, partial INTEGER NOT NULL, observed_at TEXT NOT NULL); PRAGMA user_version = 4;')
+    })()
+  }
 }
 
 export function listSources(db: Database.Database): Source[] {
-  return (db.prepare('SELECT * FROM sources ORDER BY rowid').all() as Array<{ id: string; path: string; native_path: string; host: string; exclusions: string; enabled: number; revision: number; health: Source['health'] }>).map((row) => ({ id: row.id, path: row.path, nativePath: row.native_path, host: row.host, exclusions: JSON.parse(row.exclusions) as string[], enabled: row.enabled === 1, revision: row.revision, health: row.health }))
+  return (db.prepare('SELECT * FROM sources ORDER BY rowid').all() as Array<{ id: string; path: string; native_path: string; host: string; exclusions: string; enabled: number; revision: number; health: Source['health']; identity?: string | null }>).map((row) => ({ id: row.id, path: row.path, nativePath: row.native_path, host: row.host, exclusions: JSON.parse(row.exclusions) as string[], enabled: row.enabled === 1, revision: row.revision, health: row.health, ...(row.identity ? { identity: row.identity } : {}) }))
 }
 
 export function addSource(db: Database.Database, source: Source): Source {
-  db.prepare('INSERT INTO sources VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(source.id, source.path, source.nativePath, source.host, JSON.stringify(source.exclusions), source.enabled ? 1 : 0, source.revision, source.health)
+  db.prepare('INSERT INTO sources (id, path, native_path, host, exclusions, enabled, revision, health, identity) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').run(source.id, source.path, source.nativePath, source.host, JSON.stringify(source.exclusions), source.enabled ? 1 : 0, source.revision, source.health, source.identity ?? null)
   return source
 }
 

@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { lstat, realpath, opendir } from 'node:fs/promises'
 import { isAbsolute, relative, resolve, sep, win32 } from 'node:path'
 import { spawn } from 'node:child_process'
+import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import type { Hono } from 'hono'
 import type { LocalSecurity } from './security.ts'
@@ -15,6 +16,36 @@ export type SourceAdapters = { pick?: () => Promise<PickerResult>; inspectEntry?
 const LIMIT = 48
 const TTL = 2 * 60_000
 const WINDOWS_HELPER = fileURLToPath(new URL('../../native/source-preview.exe', import.meta.url))
+const INVENTORY_HELPER = fileURLToPath(new URL('../../native/source-inventory.exe', import.meta.url))
+let inventoryBusy = false // ponytail: one concurrent native scan; per-source queue only if fixture throughput requires it.
+
+function nativeInventory(source: Source, home: string, signal: AbortSignal): Promise<{ observations: string[]; partial: boolean }> {
+  return new Promise((resolveResult, reject) => {
+    if (signal.aborted || !source.identity) return reject(new Error('Source cancelled or missing approved root identity'))
+    const child = spawn(INVENTORY_HELPER, [source.nativePath, home, source.identity, ...(process.env.FRIDAY_DIAGNOSTICS === '1' && process.env.FRIDAY_TEST_INVENTORY_STALL === '1' ? ['--stall'] : [])], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] })
+    const chunks: Buffer[] = []
+    let size = 0
+    let failed = false
+    let stderr = ''
+    const kill = () => { failed = true; child.kill() }
+    signal.addEventListener('abort', kill, { once: true })
+    const timer = setTimeout(kill, 2_500)
+    child.stdout.on('data', (chunk: Buffer) => { size += chunk.length; if (size > 8192) kill(); else chunks.push(chunk) })
+    child.stderr.on('data', (chunk: Buffer) => { stderr += chunk.toString('utf8').slice(0, Math.max(0, 256 - stderr.length)) })
+    child.once('error', (error) => { failed = true; reject(error) })
+    child.once('close', (code) => {
+      clearTimeout(timer)
+      signal.removeEventListener('abort', kill)
+      if (failed || code !== 0 || signal.aborted) return reject(new Error(`Native inventory refused (${stderr || 'cancelled, timed out or oversized'})`))
+      const lines = Buffer.concat(chunks).toString('utf8').split(/\r?\n/)
+      const end = lines.pop() === '' ? lines.pop() : undefined
+      const match = /^END entries=(\d+) depth=3 bytes=(\d+) clipped=([01])$/.exec(end ?? '')
+      if (!match || Number(match[1]) > 32 || Number(match[2]) > 256 || lines.length > 32 ||
+        lines.some((line) => !/^(DIR|FILE|SKIP|MANIFEST) [0-3] "(?:\\u[0-9a-f]{4})+"(?: [0-9a-f]{0,512})?$/.test(line))) return reject(new Error('Incomplete or invalid native inventory'))
+      resolveResult({ observations: lines, partial: match[3] === '1' })
+    })
+  })
+}
 type NativeResult = { version: 1; nativePath: string; identity: string; sample: string[]; skipped: string[]; truncated: boolean }
 
 function nativePreview(path: string, home: string, mode: '--preview' | '--identity' | '--hold', signal?: AbortSignal): Promise<{ value: NativeResult; lease?: SharedArrayBuffer; release: () => Promise<void> }> {
@@ -122,9 +153,11 @@ export function registerSources(app: Hono, security: LocalSecurity, store: Store
   const tickets = new Map<string, Ticket>()
   const pending = new Map<string, { owner: string; path: string; controller: AbortController }>()
   const generations = new Map<string, number>()
+  const inventoryJobs = new Map<string, AbortController>()
   const invalidate = (path: string) => {
     generations.set(path, (generations.get(path) ?? 0) + 1)
     for (const request of pending.values()) if (request.path === path) request.controller.abort()
+    for (const job of inventoryJobs.values()) if ((job as AbortController & { path?: string }).path === path) job.abort()
     for (const [id, ticket] of tickets) if (ticket.nativePath === path || ticket.path === path) tickets.delete(id)
   }
   const error = (e: unknown) => {
@@ -153,6 +186,30 @@ export function registerSources(app: Hono, security: LocalSecurity, store: Store
       const result = await (adapters.pick ?? pick)()
       return c.json(result.kind === 'selected' && !validPath(result.path) ? { kind: 'unavailable', message: 'Folder picker returned no usable path. Enter it manually.' } : result)
     } catch { return c.json({ kind: 'unavailable', message: 'Folder picker unavailable. Enter the native path manually.' }) }
+  })
+  app.post('/api/sources/:id/inventory', security.mutationGuard, async (c) => {
+    if (process.platform !== 'win32' || process.env.FRIDAY_DIAGNOSTICS !== '1') return c.json({ code: 'UNSUPPORTED_CAPABILITY', error: 'Native fixture inventory is unavailable on this host' }, 503)
+    if (inventoryBusy) return c.json({ code: 'RATE_LIMITED', error: 'Native inventory already running' }, 429)
+    inventoryBusy = true
+    try {
+      const source = (await store.listSources()).find((item) => item.id === c.req.param('id'))
+      const temp = tmpdir()
+      if (!source?.enabled || source.host !== 'windows' || !source.identity || source.exclusions.length || !source.nativePath.toLowerCase().startsWith(`${temp.toLowerCase()}\\friday-inventory-`) ||
+        source.nativePath.toLowerCase() === temp.toLowerCase()) return c.json({ code: 'INVALID_SCOPE', error: 'Only an active approved Windows TEMP fixture is supported' }, 403)
+      const controller = new AbortController()
+      ;(controller as AbortController & { path?: string }).path = source.nativePath
+      inventoryJobs.set(source.id, controller)
+      const result = await nativeInventory(source, dataHome, controller.signal)
+      if (controller.signal.aborted) throw new Error('Source permission changed')
+      await store.commitInventory(source.id, source.revision, source.identity, result.observations, result.partial)
+      if (controller.signal.aborted) throw new Error('Source permission changed')
+      return c.json({ sourceId: source.id, ...result })
+    } catch { return c.json({ code: 'SOURCE_UNAVAILABLE', error: 'Native inventory refused, changed, cancelled or timed out; no partial output committed' }, 409) }
+    finally { inventoryBusy = false; inventoryJobs.delete(c.req.param('id')) }
+  })
+  app.get('/api/sources/:id/inventory', async (c) => {
+    if (process.platform !== 'win32' || process.env.FRIDAY_DIAGNOSTICS !== '1') return c.json({ code: 'UNSUPPORTED_CAPABILITY' }, 503)
+    return c.json({ inventory: await store.getInventory(c.req.param('id')) })
   })
   app.post('/api/sources/preview', security.mutationGuard, async (c) => {
     let requestId: string | undefined
@@ -235,7 +292,7 @@ export function registerSources(app: Hono, security: LocalSecurity, store: Store
       const checked = native ? { ...scope, nativePath: native.nativePath } : await validate(scope, dataHome)
       if (!tickets.has(ticket.id)) throw new Error('Preview cancelled or source permission changed; preview again')
       if (generation !== (generations.get(scope.path) ?? 0) || checked.nativePath !== ticket.nativePath || (native && native.identity !== ticket.identity)) throw new Error('Folder identity changed; preview again')
-      const source: Source = { ...checked, id: randomUUID(), enabled: true, revision: 1, health: 'ready' }
+      const source: Source = { ...checked, id: randomUUID(), enabled: true, revision: 1, health: 'ready', ...(native ? { identity: native.identity } : {}) }
       const saved = await store.approveSource(ticket.id, ticket.owner, source, native?.identity, generation, leaseDeadline, nativeLease?.lease)
       tickets.delete(ticket.id)
       return c.json(saved)
@@ -263,5 +320,5 @@ export function registerSources(app: Hono, security: LocalSecurity, store: Store
     if (source) await store.invalidateApprovals([source.path, source.nativePath])
     return c.json({ revoked: await store.revokeSource(c.req.param('id')) })
   })
-  return () => { tickets.clear(); for (const request of pending.values()) request.controller.abort() }
+  return () => { tickets.clear(); for (const request of pending.values()) request.controller.abort(); for (const job of inventoryJobs.values()) job.abort() }
 }

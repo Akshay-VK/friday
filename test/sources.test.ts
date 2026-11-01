@@ -257,3 +257,19 @@ test('bounded fixture preview operates under an enforced source write denial, in
   assert.equal(await readFile(join(root, '.hidden'), 'utf8'), 'private fixture')
   assert.equal(await readFile(join(root, '.git', 'config'), 'utf8'), 'unchanged')
 })
+
+test('inventory read refuses unsupported host even with an active approved scan root', async (t) => {
+  if (process.platform === 'win32') return t.skip('native Windows inventory has its own generated fixture')
+  const root = await mkdtemp(join(tmpdir(), 'friday-inventory-fixture-'))
+  const home = await mkdtemp(join(tmpdir(), 'friday-inventory-home-'))
+  const host = await startFriday({ dataHome: home, port: 0 })
+  t.after(async () => { await host.close(); await rm(root, { recursive: true, force: true }); await rm(home, { recursive: true, force: true }) })
+  const session = await bootstrap(host.url)
+  const headers = mutationHeaders(host.url, session.cookie, session.body.csrfToken)
+  const scope = { path: root, host: 'local', exclusions: [] }
+  const preview = await (await fetch(`${host.url}/api/sources/preview`, { method: 'POST', headers, body: JSON.stringify(scope) })).json() as { previewId: string }
+  const approved = await (await fetch(`${host.url}/api/sources`, { method: 'POST', headers, body: JSON.stringify({ ...scope, previewId: preview.previewId }) })).json() as { id: string }
+  const response = await fetch(`${host.url}/api/sources/${approved.id}/inventory`, { method: 'POST', headers, body: '{}' })
+  assert.equal(response.status, 503)
+  assert.equal((await response.json() as { code: string }).code, 'UNSUPPORTED_CAPABILITY')
+})

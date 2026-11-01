@@ -1,0 +1,42 @@
+{
+  "name": "friday",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Friday: a local, read-only control room for your laptop.",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "build": "vite build",
+    "build:native:windows": "x86_64-w64-mingw32-gcc -std=c11 -municode -O2 -Wall native/source-preview.c -o native/source-preview.exe",
+    "build:native:inventory": "x86_64-w64-mingw32-gcc -std=c11 -municode -O2 -Wall native/source-inventory.c -o native/source-inventory.exe",
+    "start": "node src/server/main.ts",
+    "dev": "npm run build && npm start",
+    "typecheck": "tsc --noEmit",
+    "pretest": "npm run build",
+    "test": "node --test --test-concurrency=1 test/api.test.ts test/ui.test.ts test/backup.test.ts test/sources.test.ts test/source-write-trace.test.ts",
+    "test:browser": "npm run build && node --test --test-concurrency=1 test/browser.test.ts",
+    "verify": "npm run typecheck && npm test && npm run test:browser"
+  },
+  "dependencies": {
+    "@hono/node-server": "2.1.5",
+    "better-sqlite3": "13.0.3",
+    "hono": "4.13.14",
+    "react": "19.3.1",
+    "react-dom": "19.3.1"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "9.6.0",
+    "@types/node": "26.6.5",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@vitejs/plugin-react": "6.1.2",
+    "playwright-core": "1.64.1",
+    "typescript": "5.9.3",
+    "vite": "8.3.5"
+  },
+  "allowScripts": {
+    "better-sqlite3@13.0.3": true
+  }
+}

@@ -1,6 +1,6 @@
 # Friday: approved product and implementation plan
 
-Status: approved direction; software not implemented. Prepared 2026-10-28.
+Status: approved direction; implementation is partial (see repository README). Prepared 2026-10-28; #4 scope revision recorded 2026-10-30.
 
 This document set expands [the original build spec](../Friday%20a%20read-only%20control%20room%20for%20your%20laptop.md). The original remains historical input, not proof of an implemented capability. The user approved the decisions recorded here after four interview rounds and a consolidated review.
 
@@ -61,6 +61,8 @@ No GitHub issues, application code, external project scans, credentials, Telegra
 | VG-06 | Quanta mirror location and supported file types; direct store access only if necessary | D5 |
 | VG-07 | Safe preview support for photo formats and cloud placeholders without hydration | D5 |
 | VG-08 | Telegram delivery, deduplication, approval replay resistance, and crash boundaries | D6 |
+
+**#4 revision (2026-10-30):** Owner approved an ordinary local Windows-root, manual-entry-only acceptance subset. This is not a safety waiver: unsupported cloud/WSL/share/reparse or uncertain paths still refuse. The real picker interaction portion of VG-03, genuine cloud-provider nonhydration and exhaustive native Windows attempted-write tracing of VG-02/T01 remain **unverified** in follow-up #57 and block final hardened #55; do not count them as passed or enable those paths from synthetic fixtures. Existing negative tests and source purity still apply to #4. Original full gates remain in this register for future support.
 
 ## Source confidence and research notes
 

@@ -1,0 +1,6 @@
+node_modules/
+dist/
+native/*.exe
+.windows-verify/
+*.log
+.DS_Store

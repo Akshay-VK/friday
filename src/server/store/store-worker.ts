@@ -81,7 +81,7 @@ parentPort?.on('message', (message: StoreWorkerInput) => {
       case 'approveSource': {
         const a = approvals.get(message.approvalId)
         const s = message.source
-        if (!a || a.owner !== message.owner || a.expires <= Date.now() || a.generation !== message.generation || a.identity !== message.identity ||
+        if (!a || a.owner !== message.owner || a.expires <= Date.now() || a.generation !== message.generation || a.identity !== message.identity || s.identity !== message.identity ||
           (s.host === 'windows' && (!message.lease || Atomics.load(new Int32Array(message.lease), 0) !== 1 || !message.leaseDeadline || message.leaseDeadline <= Date.now() + 3_000)) ||
           JSON.stringify([a.path, a.nativePath, a.host, a.exclusions]) !== JSON.stringify([s.path, s.nativePath, s.host, s.exclusions])) throw new Error('Preview expired, cancelled or folder identity changed; preview again')
         // The worker owns both the single-use ticket and the database write.
@@ -93,7 +93,7 @@ parentPort?.on('message', (message: StoreWorkerInput) => {
       }
       case 'disableSource':
         pending = undefined
-        { const source = disableSource(db, message.sourceId, message.revision); invalidate([source.path, source.nativePath]); send({ type: 'result', id: message.id, value: source }) }
+        { const source = db.transaction(() => { const disabled = disableSource(db, message.sourceId, message.revision); db.prepare('DELETE FROM inventory WHERE source_id=?').run(disabled.id); return disabled })(); invalidate([source.path, source.nativePath]); send({ type: 'result', id: message.id, value: source }) }
         break
       case 'setSourceHealth':
         send({ type: 'result', id: message.id, value: setSourceHealth(db, message.sourceId, message.revision, message.health) })
@@ -102,6 +102,21 @@ parentPort?.on('message', (message: StoreWorkerInput) => {
         pending = undefined
         { const source = listSources(db).find((item) => item.id === message.sourceId); const removed = db.prepare('DELETE FROM sources WHERE id=?').run(message.sourceId).changes > 0; if (source) invalidate([source.path, source.nativePath]); send({ type: 'result', id: message.id, value: removed }) }
         break
+      case 'commitInventory': {
+        const source = listSources(db).find((item) => item.id === message.sourceId)
+        if (!source || !source.enabled || source.host !== 'windows' || source.revision !== message.revision || !source.identity || source.identity !== message.identity ||
+          message.observations.length > 32 || message.observations.some((item) => typeof item !== 'string' || item.length > 4096) ||
+          Buffer.byteLength(JSON.stringify(message.observations)) > 20000) throw new Error('Source disabled, replaced or invalid inventory; discard late result')
+        db.prepare('INSERT INTO inventory VALUES (?, ?, ?, ?) ON CONFLICT(source_id) DO UPDATE SET observations=excluded.observations, partial=excluded.partial, observed_at=excluded.observed_at')
+          .run(source.id, JSON.stringify(message.observations), message.partial ? 1 : 0, new Date().toISOString())
+        send({ type: 'result', id: message.id, value: true })
+        break
+      }
+      case 'getInventory': {
+        const row = db.prepare('SELECT i.observations, i.partial, i.observed_at FROM inventory i JOIN sources s ON s.id=i.source_id WHERE s.id=? AND s.enabled=1').get(message.sourceId) as { observations: string; partial: number; observed_at: string } | undefined
+        send({ type: 'result', id: message.id, value: row ? { observations: JSON.parse(row.observations), partial: !!row.partial, observedAt: row.observed_at } : null })
+        break
+      }
       case 'setTheme':
         pending = undefined
         send({

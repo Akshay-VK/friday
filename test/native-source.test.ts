@@ -4,6 +4,7 @@ import { mkdtemp, mkdir, writeFile, readFile, readdir, lstat, symlink, rename, r
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { spawn } from 'node:child_process'
+import { get as httpGet } from 'node:http'
 import { startFriday } from '../src/server/start.ts'
 import { bootstrap, mutationHeaders } from './helpers/harness.ts'
 
@@ -124,4 +125,95 @@ test('native Windows fixture: handle-bound preview, unchanged hidden files, iden
   await rename(root, swapped)
   await rename(swapped, root)
   assert.deepEqual(await snapshot(), before, 'no fixture contents or metadata changed by preview/approval')
+})
+
+test('native Windows approved ordinary local root inventory honors exclusions, revalidates cache and kills stalled helper', async (t) => {
+  assert.equal(process.platform, 'win32')
+  const base = await mkdtemp(join(tmpdir(), 'ordinary-local-api-'))
+  const root = join(base, 'root'), home = join(base, 'home')
+  await mkdir(root); await mkdir(home); await mkdir(join(root, '.git'))
+  await writeFile(join(root, '.git', 'config'), '[core]\nfixture=true')
+  await mkdir(join(root, 'excluded'))
+  await writeFile(join(root, 'excluded', 'secret.txt'), 'excluded content')
+  const before = await Promise.all([lstat(join(root, '.git')), lstat(join(root, '.git', 'config'))])
+  const oldDiagnostics = process.env.FRIDAY_DIAGNOSTICS
+  delete process.env.FRIDAY_DIAGNOSTICS
+  const host = await startFriday({ dataHome: home, port: 0 })
+  t.after(async () => { delete process.env.FRIDAY_TEST_INVENTORY_STALL; if (oldDiagnostics === undefined) delete process.env.FRIDAY_DIAGNOSTICS; else process.env.FRIDAY_DIAGNOSTICS = oldDiagnostics; await host.close(); await rm(base, { recursive: true, force: true }) })
+  const session = await bootstrap(host.url)
+  const headers = mutationHeaders(host.url, session.cookie, session.body.csrfToken)
+  const scope = { path: root, host: 'windows', exclusions: ['excluded'] }
+  const mutate = (method: string, route: string, body: object) => fetch(`${host.url}/api/sources${route}`, { method, headers, body: JSON.stringify(body) })
+  const ticket = await (await mutate('POST', '/preview', scope)).json() as { previewId: string }
+  const response = await mutate('POST', '', { ...scope, previewId: ticket.previewId })
+  assert.equal(response.status, 200, await response.clone().text())
+  const source = await response.json() as { id: string; identity: string; revision: number }
+  assert.match(source.identity, /^[a-f0-9]{16}-[a-f0-9]{32}$/)
+  const ambiguous = { ...scope, exclusions: ['bad:name'] }
+  const badPreview = await (await mutate('POST', '/preview', ambiguous)).json() as { previewId: string }
+  const badGrant = await mutate('POST', '', { ...ambiguous, previewId: badPreview.previewId })
+  assert.equal(badGrant.status, 200)
+  const badId = (await badGrant.json() as { id: string }).id
+  assert.equal((await mutate('POST', `/${badId}/inventory`, {})).status, 403, 'unsupported exclusion must fail closed')
+  assert.equal((await mutate('DELETE', `/${badId}`, {})).status, 200)
+  const backup = await (await fetch(`${host.url}/api/backups/create`, { method: 'POST', headers, body: '{}' })).json() as { id: string }
+  const read = () => mutate('POST', `/${source.id}/inventory`, {})
+  const hostileHost = await new Promise<number | undefined>((resolve, reject) => {
+    httpGet(`${host.url}/api/sources/${source.id}/inventory`, { headers: { Host: 'evil.example' } }, (response) => {
+      response.resume(); response.on('end', () => resolve(response.statusCode))
+    }).on('error', reject)
+  })
+  assert.equal(hostileHost, 403)
+  for (const [name, value] of [['Origin', 'https://evil.example'], ['X-Friday-CSRF', 'invalid']] as const) {
+    const hostile = new Headers(headers)
+    hostile.set(name, value)
+    assert.notEqual((await fetch(`${host.url}/api/sources/${source.id}/inventory`, { method: 'POST', headers: hostile, body: '{}' })).status, 200)
+  }
+  const first = await read()
+  assert.equal(first.status, 200, await first.clone().text())
+  const value = await first.json() as { observations: string[]; partial: boolean }
+  assert.ok(value.observations.some((line) => line.startsWith('MANIFEST ')))
+  assert.ok(!value.observations.some((line) => line.includes('excluded') || line.includes('secret.txt')))
+  assert.equal(value.partial, false)
+  assert.ok((await (await fetch(`${host.url}/api/sources/${source.id}/inventory`)).json() as { inventory: { observations: string[] } }).inventory.observations.length > 0)
+  const names = Array.from({ length: 32 }, (_, i) => `long-${String(i).padStart(2, '0')}-${'z'.repeat(100)}`)
+  for (const name of names) await writeFile(join(root, name), '')
+  const bounded = await read()
+  assert.equal(bounded.status, 200, await bounded.clone().text())
+  assert.equal((await bounded.json() as { partial: boolean }).partial, true)
+  for (const name of names) await rm(join(root, name))
+  process.env.FRIDAY_DIAGNOSTICS = '1'
+  process.env.FRIDAY_TEST_INVENTORY_STALL = '1'
+  const started = Date.now()
+  const waiting = read()
+  await new Promise((resolve) => setTimeout(resolve, 150))
+  assert.equal((await read()).status, 429, 'only one native collector process at a time')
+  const stalled = await waiting
+  assert.equal(stalled.status, 409)
+  assert.ok(Date.now() - started < 6000, 'parent kills/waits for blocking native helper')
+  delete process.env.FRIDAY_TEST_INVENTORY_STALL
+  const moved = join(base, 'old-root')
+  await rename(root, moved); await mkdir(root)
+  assert.equal((await read()).status, 409, 'replacement root is not the persisted grant')
+  assert.deepEqual(await (await fetch(`${host.url}/api/sources/${source.id}/inventory`)).json(), { inventory: null }, 'replaced root must not expose cached observations')
+  await rm(root, { recursive: true, force: true }); await rename(moved, root)
+  assert.ok((await (await fetch(`${host.url}/api/sources/${source.id}/inventory`)).json() as { inventory: unknown }).inventory, 'restored original grant is current again')
+  process.env.FRIDAY_TEST_INVENTORY_STALL = '1'
+  const pending = read()
+  await new Promise((resolve) => setTimeout(resolve, 150))
+  assert.equal((await mutate('PATCH', `/${source.id}`, { enabled: false, expectedRevision: source.revision })).status, 200)
+  assert.equal((await pending).status, 409, 'disable cancels native read and refuses late commit')
+  delete process.env.FRIDAY_TEST_INVENTORY_STALL
+  assert.equal((await read()).status, 403)
+  assert.deepEqual(await (await fetch(`${host.url}/api/sources/${source.id}/inventory`)).json(), { inventory: null })
+  assert.equal((await mutate('DELETE', `/${source.id}`, {})).status, 200)
+  const plan = await (await fetch(`${host.url}/api/backups/restore-preview`, { method: 'POST', headers, body: JSON.stringify({ id: backup.id }) })).json() as { confirmation: string }
+  assert.equal((await fetch(`${host.url}/api/backups/restore`, { method: 'POST', headers, body: JSON.stringify({ id: backup.id, confirmation: plan.confirmation }) })).status, 200)
+  const restored = (await (await fetch(`${host.url}/api/sources`)).json() as { sources: Array<{ identity: string; enabled: boolean }> }).sources[0]
+  assert.equal(restored?.identity, source.identity)
+  assert.equal(restored?.enabled, false)
+  assert.equal((await read()).status, 403)
+  assert.equal(await readFile(join(root, '.git', 'config'), 'utf8'), '[core]\nfixture=true')
+  const after = await Promise.all([lstat(join(root, '.git')), lstat(join(root, '.git', 'config'))])
+  assert.deepEqual(after.map((entry) => entry.mtimeMs), before.map((entry) => entry.mtimeMs), 'native reads did not change source timestamps')
 })

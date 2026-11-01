@@ -113,6 +113,8 @@ export class StoreClient {
   disableSource(sourceId: string, revision: number): Promise<Source> { return this.#request({ type: 'disableSource', sourceId, revision }) }
   setSourceHealth(sourceId: string, revision: number, health: Source['health']): Promise<Source> { return this.#request({ type: 'setSourceHealth', sourceId, revision, health }) }
   revokeSource(sourceId: string): Promise<boolean> { return this.#request({ type: 'revokeSource', sourceId }) }
+  commitInventory(sourceId: string, revision: number, identity: string, observations: string[], partial: boolean): Promise<boolean> { return this.#request({ type: 'commitInventory', sourceId, revision, identity, observations, partial }) }
+  getInventory(sourceId: string): Promise<{ observations: string[]; partial: boolean; observedAt: string } | null> { return this.#request({ type: 'getInventory', sourceId }) }
 
   createBackup(): Promise<{ id: string; counts: { preferences: number }; createdAt: string }> { return this.#request({ type: 'createBackup' }) }
   listBackups(): Promise<{ backups: Array<{ id: string; createdAt: string; kind: string; counts: { preferences: number } }>; lastFailure?: string }> { return this.#request({ type: 'listBackups' }) }

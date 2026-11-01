@@ -21,7 +21,7 @@ test('authored theme can be backed up, previewed and explicitly restored after a
   assert.deepEqual(files.sort(), ['manifest.json', 'state.sqlite'])
   const manifest = JSON.parse(await readFile(join(host.dataHome, 'backups', backup.id, 'manifest.json'), 'utf8')) as { checksum: string; schemaVersion: number }
   assert.match(manifest.checksum, /^[a-f0-9]{64}$/)
-  assert.equal(manifest.schemaVersion, 3)
+  assert.equal(manifest.schemaVersion, 4)
   await fetch(`${host.url}/api/preferences/theme`, { method: 'PUT', headers, body: JSON.stringify({ value: 'system' }) })
   const preview = await call('restore-preview', { id: backup.id })
   assert.equal(preview.status, 200)
@@ -220,6 +220,6 @@ test('a changed migration record refuses startup without silently rewriting auth
   assert.notEqual(failed.code, 0)
   assert.match(failed.stderr, /migration record/)
   const current = new Database(join(home, 'friday.sqlite'), { readonly: true })
-  assert.equal(current.pragma('user_version', { simple: true }), 3)
+  assert.equal(current.pragma('user_version', { simple: true }), 4)
   current.close()
 })

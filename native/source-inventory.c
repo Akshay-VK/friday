@@ -10,6 +10,8 @@ static ULONGLONG deadline;
 static int entries, read_bytes, clipped, output_bytes;
 static FILE_ID_INFO root_id;
 static int pause_flip;
+static const wchar_t *exclusions[32];
+static int exclusion_count;
 
 // Each record is built completely before writing; leave room for END even if capped.
 static int emit(const char *kind, const wchar_t *name, size_t length, const BYTE *data, DWORD bytes, int depth) {
@@ -70,6 +72,10 @@ static int walk(HANDLE parent, int depth, int git_dir, CLASSIFY classify) {
       if ((e->FileNameLength & 1) || e->FileNameLength > sizeof buffer - offset - offsetof(FILE_ID_EXTD_DIR_INFO, FileName)) return fail(L"entry length");
       size_t n = e->FileNameLength / sizeof(wchar_t);
       if (n && !(n == 1 && e->FileName[0] == L'.') && !(n == 2 && e->FileName[0] == L'.' && e->FileName[1] == L'.')) {
+        int excluded = 0;
+        if (!depth) for (int i = 0; i < exclusion_count; i++)
+          if (wcslen(exclusions[i]) == n && !_wcsnicmp(exclusions[i], e->FileName, n)) excluded = 1;
+        if (excluded) goto next_entry;
         if (++entries > MAX_ENTRIES) { clipped = 1; return 0; }
         int dir = !!(e->FileAttributes & FILE_ATTRIBUTE_DIRECTORY);
         DWORD tag = e->FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT ? e->ReparsePointTag : 0;
@@ -90,8 +96,9 @@ static int walk(HANDLE parent, int depth, int git_dir, CLASSIFY classify) {
                 !GetFileInformationByHandleEx(child, FileIdInfo, &id, sizeof id) ||
                 !!(a.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) != dir ||
                 !safe_attr(a.FileAttributes, a.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT ? a.ReparseTag : 0, classify) ||
-                id.VolumeSerialNumber != root_id.VolumeSerialNumber || memcmp(&id.FileId, &e->FileId, sizeof id.FileId) != 0) {
-              if (!emit("SKIP", e->FileName, n, NULL, 0, depth)) { CloseHandle(child); clipped = 1; return 0; }
+                 id.VolumeSerialNumber != root_id.VolumeSerialNumber || memcmp(&id.FileId, &e->FileId, sizeof id.FileId) != 0) {
+               clipped = 1;
+               if (!emit("SKIP", e->FileName, n, NULL, 0, depth)) { CloseHandle(child); clipped = 1; return 0; }
             } else if (dir) {
               if (!emit("DIR", e->FileName, n, NULL, 0, depth)) { CloseHandle(child); clipped = 1; return 0; }
               if (walk(child, depth + 1, n == 4 && wcsncmp(e->FileName, L".git", 4) == 0, classify)) { CloseHandle(child); return 2; }
@@ -106,9 +113,10 @@ static int walk(HANDLE parent, int depth, int git_dir, CLASSIFY classify) {
               } else { clipped = 1; if (!emit("SKIP", e->FileName, n, NULL, 0, depth)) { CloseHandle(child); return 0; } }
             }
             CloseHandle(child);
-          }
+          } else { clipped = 1; if (!emit("SKIP", e->FileName, n, NULL, 0, depth)) return 0; }
         } else if (!emit("FILE", e->FileName, n, NULL, 0, depth)) { clipped = 1; return 0; }
       }
+      next_entry:
       if (!e->NextEntryOffset) break;
       if (e->NextEntryOffset < offsetof(FILE_ID_EXTD_DIR_INFO, FileName) || e->NextEntryOffset > sizeof buffer - offset) return fail(L"entry offset");
       offset += e->NextEntryOffset;
@@ -117,9 +125,15 @@ static int walk(HANDLE parent, int depth, int git_dir, CLASSIFY classify) {
 }
 int wmain(int argc, wchar_t **argv) {
   // Same root/home validation as the existing helper, plus expected grant identity.
-  if ((argc != 4 && argc != 5) || !input(argv[1]) || !input(argv[2]) || wcslen(argv[3]) != 49 ||
-      (argc == 5 && wcscmp(argv[4], L"--pause-flip") && wcscmp(argv[4], L"--stall"))) return fail(L"args");
-  pause_flip = argc == 5;
+  if (argc < 4 || !input(argv[1]) || !input(argv[2]) || wcslen(argv[3]) != 49) return fail(L"args");
+  int arg = 4;
+  if (arg < argc && (!wcscmp(argv[arg], L"--pause-flip") || !wcscmp(argv[arg], L"--stall"))) { pause_flip = 1; arg++; }
+  while (arg < argc) {
+    if (argc - arg < 2 || wcscmp(argv[arg], L"--exclude") || exclusion_count == 32 ||
+        !child_name(argv[arg+1], wcslen(argv[arg+1]))) return fail(L"exclusion args");
+    for (int i = 0; i < exclusion_count; i++) if (!_wcsicmp(exclusions[i], argv[arg+1])) return fail(L"duplicate exclusion");
+    exclusions[exclusion_count++] = argv[arg+1]; arg += 2;
+  }
   HMODULE cloud = LoadLibraryExW(L"CldApi.dll", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
   CLASSIFY classify = cloud ? (CLASSIFY)GetProcAddress(cloud, "CfGetPlaceholderStateFromAttributeTag") : NULL;
   if (!classify) { if (cloud) FreeLibrary(cloud); return fail(L"cloud classifier unavailable"); }
@@ -143,7 +157,7 @@ int wmain(int argc, wchar_t **argv) {
   swprintf(identity, 50, L"%016llx-", (unsigned long long)root_id.VolumeSerialNumber);
   for (int i = 0; i < 16; i++) swprintf(identity+17+i*2, 50-17-i*2, L"%02x", (unsigned)root_id.FileId.Identifier[i]);
   if (_wcsicmp(identity, argv[3])) { fail(L"grant root identity mismatch"); goto done; }
-  if (argc == 5 && !wcscmp(argv[4], L"--stall")) { fprintf(stderr, "READY_STALL\n"); fflush(stderr); Sleep(10000); }
+  if (pause_flip && !wcscmp(argv[4], L"--stall")) { fprintf(stderr, "READY_STALL\n"); fflush(stderr); Sleep(10000); }
   deadline = GetTickCount64() + 2000;
   rc = walk(root, 0, 0, classify);
   if (!rc) printf("END entries=%d depth=%d bytes=%d clipped=%d\n", entries > MAX_ENTRIES ? MAX_ENTRIES : entries, MAX_DEPTH, read_bytes, clipped);

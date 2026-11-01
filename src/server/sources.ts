@@ -2,7 +2,6 @@ import { randomUUID } from 'node:crypto'
 import { lstat, realpath, opendir } from 'node:fs/promises'
 import { isAbsolute, relative, resolve, sep, win32 } from 'node:path'
 import { spawn } from 'node:child_process'
-import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import type { Hono } from 'hono'
 import type { LocalSecurity } from './security.ts'
@@ -22,7 +21,7 @@ let inventoryBusy = false // ponytail: one concurrent native scan; per-source qu
 function nativeInventory(source: Source, home: string, signal: AbortSignal): Promise<{ observations: string[]; partial: boolean }> {
   return new Promise((resolveResult, reject) => {
     if (signal.aborted || !source.identity) return reject(new Error('Source cancelled or missing approved root identity'))
-    const child = spawn(INVENTORY_HELPER, [source.nativePath, home, source.identity, ...(process.env.FRIDAY_DIAGNOSTICS === '1' && process.env.FRIDAY_TEST_INVENTORY_STALL === '1' ? ['--stall'] : [])], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] })
+    const child = spawn(INVENTORY_HELPER, [source.nativePath, home, source.identity, ...(process.env.FRIDAY_DIAGNOSTICS === '1' && process.env.FRIDAY_TEST_INVENTORY_STALL === '1' ? ['--stall'] : []), ...source.exclusions.flatMap((name) => ['--exclude', name])], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] })
     const chunks: Buffer[] = []
     let size = 0
     let failed = false
@@ -188,14 +187,15 @@ export function registerSources(app: Hono, security: LocalSecurity, store: Store
     } catch { return c.json({ kind: 'unavailable', message: 'Folder picker unavailable. Enter the native path manually.' }) }
   })
   app.post('/api/sources/:id/inventory', security.mutationGuard, async (c) => {
-    if (process.platform !== 'win32' || process.env.FRIDAY_DIAGNOSTICS !== '1') return c.json({ code: 'UNSUPPORTED_CAPABILITY', error: 'Native fixture inventory is unavailable on this host' }, 503)
+    if (process.platform !== 'win32') return c.json({ code: 'UNSUPPORTED_CAPABILITY', error: 'Native Windows inventory is unavailable on this host' }, 503)
     if (inventoryBusy) return c.json({ code: 'RATE_LIMITED', error: 'Native inventory already running' }, 429)
     inventoryBusy = true
     try {
       const source = (await store.listSources()).find((item) => item.id === c.req.param('id'))
-      const temp = tmpdir()
-      if (!source?.enabled || source.host !== 'windows' || !source.identity || source.exclusions.length || !source.nativePath.toLowerCase().startsWith(`${temp.toLowerCase()}\\friday-inventory-`) ||
-        source.nativePath.toLowerCase() === temp.toLowerCase()) return c.json({ code: 'INVALID_SCOPE', error: 'Only an active approved Windows TEMP fixture is supported' }, 403)
+      if (!source?.enabled || source.host !== 'windows' || !source.identity ||
+        source.exclusions.some((name, i) => !/^[^\\/:~\x00-\x1f]{1,128}$/.test(name) || /[ .]$/.test(name) ||
+          source.exclusions.slice(0, i).some((other) => other.toLowerCase() === name.toLowerCase())))
+        return c.json({ code: 'INVALID_SCOPE', error: 'Active approved Windows root with unambiguous top-level exclusions required' }, 403)
       const controller = new AbortController()
       ;(controller as AbortController & { path?: string }).path = source.nativePath
       inventoryJobs.set(source.id, controller)
@@ -208,8 +208,19 @@ export function registerSources(app: Hono, security: LocalSecurity, store: Store
     finally { inventoryBusy = false; inventoryJobs.delete(c.req.param('id')) }
   })
   app.get('/api/sources/:id/inventory', async (c) => {
-    if (process.platform !== 'win32' || process.env.FRIDAY_DIAGNOSTICS !== '1') return c.json({ code: 'UNSUPPORTED_CAPABILITY' }, 503)
-    return c.json({ inventory: await store.getInventory(c.req.param('id')) })
+    if (process.platform !== 'win32') return c.json({ code: 'UNSUPPORTED_CAPABILITY' }, 503)
+    const source = (await store.listSources()).find((item) => item.id === c.req.param('id'))
+    if (!source?.enabled || source.host !== 'windows' || !source.identity) return c.json({ inventory: null })
+    let release: (() => Promise<void>) | undefined
+    try {
+      const hold = await nativePreview(source.nativePath, dataHome, '--hold')
+      release = hold.release
+      if (hold.value.identity !== source.identity) return c.json({ inventory: null })
+      const inventory = await store.getInventory(source.id)
+      if (!hold.lease || Atomics.load(new Int32Array(hold.lease), 0) !== 1) return c.json({ inventory: null })
+      return c.json({ inventory })
+    } catch { return c.json({ inventory: null }) }
+    finally { await release?.() }
   })
   app.post('/api/sources/preview', security.mutationGuard, async (c) => {
     let requestId: string | undefined
